@@ -152,6 +152,14 @@ when defined(yithDebugSignals):
   proc signalId*[T](s: State[T]): int =
     result = s.sig.id
 
+proc memStats*(): string =
+  ## Allocator counters in KiB. `occupied` is the amount currently held by
+  ## live cells; a stable value across idle periods / repeated interactions
+  ## means the runtime is not leaking.
+  result = "alloc occupied=" & $(getOccupiedMem() div 1024) &
+           "KiB total=" & $(getTotalMem() div 1024) &
+           "KiB free=" & $(getFreeMem() div 1024) & "KiB"
+
 template state*() {.pragma.}
   ## Marks a declaration (or parameter) as reactive. A pre-sem pass lowers the
   ## UI syntax, then a module plugin rewrites `{.state.}` to `State[T]` and

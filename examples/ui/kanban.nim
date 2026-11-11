@@ -219,6 +219,17 @@ proc clearLog() {.exportc: "clearLog".} =
 proc debugMemory() {.exportc: "debugMemory".} =
   debugLog(memoryInfo())
 
+proc logMem() {.exportc: "logMem".} =
+  ## Print allocator counters, JS buffer/pages and shadow-stack depth.
+  debugLog(memStats() & " | " & memoryInfo() & " | " & stackInfo())
+
+proc memWatch(ms: int) {.exportc: "memWatch".} =
+  ## `NIF.memWatch(5000)` starts a periodic `logMem` in the browser console.
+  startMemWatch(ms)
+
+proc memWatchStop() {.exportc: "memWatchStop".} =
+  stopMemWatch()
+
 proc testGet() {.exportc: "testGet".} =
   ## Stack-leak bisect: many tracked reads in one effect.
   debugLog("testGet before " & stackInfo())

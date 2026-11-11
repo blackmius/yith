@@ -236,7 +236,20 @@ NIF.clearLog()      // start a fresh capture
 // ... click/drag until it fails ...
 NIF.dumpLog()       // print the ring buffer
 NIF.debugSignals()  // live subscriber counts per state
+NIF.logMem()        // one allocator sample
+NIF.memWatch(5000)  // print a sample every 5 seconds
+NIF.memWatchStop()
 ```
+
+`logMem` prints:
+
+```text
+alloc occupied=10KiB total=516KiB free=472KiB | mem=64.6MB pages=1033 sp=64.0 | sp=67108688 depth=1
+```
+
+`occupied` is the live heap (KiB); it should plateau after the first few
+interactions. A value that keeps climbing while idle, or pages/stack depth
+that keep moving, is a leak.
 
 The browser backend declares DOM values as opaque `ptr` handles, so scope
 teardown never reference-counts a host object (`docs/nimony-issues.md` #27).

@@ -16,6 +16,12 @@ proc memoryInfo*(): string =
 proc stackInfo*(): string =
   result = ""
 
+proc startMemWatch*(ms: int) =
+  discard
+
+proc stopMemWatch*() =
+  discard
+
 type
   NodeKind* = enum
     nkElement, nkText, nkComment

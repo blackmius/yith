@@ -94,6 +94,8 @@ proc parentNode*(n: Node): Node {.importjs: "#.parentNode".}
 proc debugLog*(s: string) {.importjs: "console.log(#)".}
 proc memoryInfo*(): string {.importjs: "(function(){var m=0;try{m=JMEM.byteLength/1048576}catch(e){}return 'mem='+m.toFixed(1)+'MB pages='+memorySize()+' sp='+((SP||0)/1048576).toFixed(1)})()".}
 proc stackInfo*(): string {.importjs: "'sp=' + SP + ' depth=' + _SPF.length".}
+proc startMemWatch*(ms: int) {.importjs: "globalThis.__yithMemTimer = setInterval(function(){ if (globalThis.NIF && globalThis.NIF.logMem) globalThis.NIF.logMem(); }, #)".}
+proc stopMemWatch*() {.importjs: "if (globalThis.__yithMemTimer) { clearInterval(globalThis.__yithMemTimer); globalThis.__yithMemTimer = 0; }".}
 proc jsStringify*(n: Node): string {.importjs: "JSON.stringify(#)".}
 proc find*(n: Node; sel: string): Node {.importjs: "#.querySelector(#)".}
 
