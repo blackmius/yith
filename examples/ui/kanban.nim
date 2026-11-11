@@ -31,6 +31,8 @@ var
   dragTask: State[int]
   dragTitle: State[string]
   liveRoot: Node
+  liveBoard: Node
+  activeZone: DragZone[Board]
 
 proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
                     dragTask: State[int]; dragTitle: State[string];
@@ -64,6 +66,7 @@ proc ColumnView*(board: State[Board]; column: State[Column];
                  dragCtl: DragController[Board];
                  dragTask: State[int]; dragTitle: State[string]): E {.ui.} =
   c.Div.col:
+    attr.id("column-" & column.get().id)
     css.width("220px")
     css.display("flex")
     css.flex_direction("column")
@@ -98,26 +101,18 @@ proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
     css.gap("16px")
     css.padding("20px")
     onPointerMove(e):
-      if dragCtl.active.get():
-        let prevTarget = dragCtl.target.get()
-        let prevFar = dragCtl.far.get()
-        discard dragCtl.move(Point(x: e.clientX, y: e.clientY))
-        # Re-render the board only when the drop target changes. Rebuilding
-        # the whole column tree on every pointer move is both expensive and
-        # what made long drags exhaust the JS backend's shadow stack.
-        if dragCtl.target.get() != prevTarget or dragCtl.far.get() != prevFar:
-          board.set(dragCtl.previewState(dragStart.get()))
+      if dragCtl.active.get() and activeZone != nil:
+        discard activeZone.move(Point(x: e.clientX, y: e.clientY))
     onPointerUp(e):
       if debugLogEnabled:
         debugLog("pointerup")
       if dragCtl.active.get():
-        discard dragCtl.finish()
-        if dragCtl.hasDrop():
-          board.set(dragCtl.chosen().state)
-        else:
-          board.set(dragStart.get())
         dragTask.set(0)
         dragTitle.set("")
+        if activeZone != nil:
+          discard activeZone.drop()
+          activeZone = nil
+      hideOverlay()
     uiBlock(proc () {.closure.} =
       for column in board.get().columns:
         ColumnView(board, newState(column), dragCtl, dragTask, dragTitle)
@@ -136,22 +131,24 @@ proc renderBoard(s: Board; model: State[Board];
   model.set(s)
   result = KanbanView(model, dragCtl, dragTask, dragTitle)
 
-proc boardTargets(states: seq[Board]; selector: string): seq[DragTarget[Board]] =
-  let tmp = newState(initialBoard())
-  let rc = newDragController[Board]()
-  let t = newState(0)
-  let ti = newState("")
-  result = speculativeTargets(states,
-    proc (s: Board): E {.closure.} =
-      renderBoard(s, tmp, rc, t, ti),
-    selector, liveRoot)
-
 proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
                     dragTask: State[int]; dragTitle: State[string];
                     taskId: int; title: string; p: Point) =
-  let states = buildDrag(board.get(), taskId)
-  let targets = boardTargets(states, "#task-" & $taskId)
-  dragCtl.start(closest(targets).withFloating(), p)
+  var tmp = newState(initialBoard())
+  var rc = newDragController[Board]()
+  var t = newState(0)
+  var ti = newState("")
+  let zone = newDragZone(board, liveBoard,
+    proc (s: Board): E {.closure.} =
+      renderBoard(s, tmp, rc, t, ti),
+    proc (s: Board): seq[Board] {.closure.} =
+      buildDrag(s, taskId),
+    proc (s: Board): string {.closure.} =
+      "#task-" & $taskId,
+    "#task-" & $taskId,
+    dragCtl, snap = 24.0)
+  activeZone = zone
+  zone.start(p)
 
 proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
                       dragTask: State[int]; dragTitle: State[string];
@@ -159,9 +156,21 @@ proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
   let ci = columnIndex(board.get(), columnId)
   if ci < 0:
     return
-  let states = buildColumnDrag(board.get(), ci)
-  let targets = boardTargets(states, "#col-" & columnId)
-  dragCtl.start(closest(targets).withFloating(), p)
+  var tmp = newState(initialBoard())
+  var rc = newDragController[Board]()
+  var t = newState(0)
+  var ti = newState("")
+  let zone = newDragZone(board, liveBoard,
+    proc (s: Board): E {.closure.} =
+      renderBoard(s, tmp, rc, t, ti),
+    proc (s: Board): seq[Board] {.closure.} =
+      buildColumnDrag(s, ci),
+    proc (s: Board): string {.closure.} =
+      "#col-" & columnId,
+    "#column-" & columnId,
+    dragCtl, snap = 18.0)
+  activeZone = zone
+  zone.start(p)
 
 proc beginKanban(parent: Node): Scope =
   liveRoot = parent
@@ -176,6 +185,7 @@ proc beginKanban(parent: Node): Scope =
                      signalId(dragCtl.pointer)]
   result = beginRoot(parent)
   discard KanbanView(board, dragCtl, dragTask, dragTitle)
+  liveBoard = find(liveRoot, ".board")
 
 proc start(parent: Node) {.exportc: "start".} =
   debugLogEnabled = true
@@ -229,6 +239,9 @@ proc memWatch(ms: int) {.exportc: "memWatch".} =
 
 proc memWatchStop() {.exportc: "memWatchStop".} =
   stopMemWatch()
+
+proc setOverlay(b: bool) {.exportc: "setOverlay".} =
+  setDragOverlay(b)
 
 proc testGet() {.exportc: "testGet".} =
   ## Stack-leak bisect: many tracked reads in one effect.

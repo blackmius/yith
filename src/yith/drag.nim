@@ -6,7 +6,14 @@
 ## the closest target. `closest(...).whenFar(fallback).withFloating()` mirrors
 ## the Dragology operators from the paper.
 
+{.feature: "assumeSync".}
+
 import ./core
+
+var dragOverlayEnabled* = false
+
+proc setDragOverlay*(on: bool) =
+  dragOverlayEnabled = on
 
 type
   Point* = object
@@ -20,6 +27,7 @@ type
     targets*: seq[DragTarget[S]]
     farTargets*: seq[DragTarget[S]]
     farRadius*: float
+    snapRadius*: float
     floating*: bool
 
   DragController*[S] = ref object
@@ -30,6 +38,7 @@ type
     targets*: seq[DragTarget[S]]
     farTargets*: seq[DragTarget[S]]
     farRadius*: float
+    snapRadius*: float
     floating*: bool
 
 proc newDragController*[S](): DragController[S] =
@@ -76,9 +85,21 @@ proc withFloating*[S](b: DragBehavior[S]): DragBehavior[S] =
   result = b
   result.floating = true
 
+proc withSnap*[S](b: DragBehavior[S]; radius: float): DragBehavior[S] =
+  ## Keep the current target until the pointer leaves `radius` px around it.
+  result = b
+  result.snapRadius = radius
+
 proc applyPointer[S](d: DragController[S]; p: Point; initial: bool) =
   var bestDist = 0.0
-  let idx = nearest(d.targets, p, bestDist)
+  var idx = nearest(d.targets, p, bestDist)
+  if not initial and d.snapRadius > 0.0:
+    let cur = d.target.get()
+    if cur >= 0 and cur < d.targets.len:
+      let d2 = dist2(d.targets[cur].pos, p)
+      if d2 <= d.snapRadius * d.snapRadius:
+        idx = cur
+        bestDist = d2
   var isFar = false
   if idx >= 0 and d.farTargets.len > 0 and d.farRadius > 0.0 and
      bestDist > d.farRadius:
@@ -107,6 +128,7 @@ proc start*[S](d: DragController[S]; b: DragBehavior[S]; p: Point) =
   d.targets = b.targets
   d.farTargets = b.farTargets
   d.farRadius = b.farRadius
+  d.snapRadius = b.snapRadius
   d.floating = b.floating
   d.applyPointer(p, true)
 
@@ -115,6 +137,7 @@ proc start*[S](d: DragController[S]; targets: seq[DragTarget[S]];
   d.targets = targets
   d.farTargets = @[]
   d.farRadius = 0.0
+  d.snapRadius = 0.0
   d.floating = false
   d.applyPointer(p, true)
 

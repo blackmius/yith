@@ -1299,7 +1299,7 @@ type
   hard-code row/column coordinates.
 - The `closest`/`between`/`whenFar`/`withFloating` operators are implemented as
   `DragBehavior`; `between` currently picks the nearest target, visual
-  interpolation is the next layer. `vary`, `withSnapRadius`, `dropTarget`,
+  interpolation is the next layer. `vary`, `dropTarget`,
   `switchToStateAndFollow` are not done yet.
 - During a drag the app can assign `previewState(start)` to the model state;
   CSS reflows the live elements into the candidate arrangement and a
@@ -1325,10 +1325,11 @@ SpecView[S] = object
   root: Node
   scope: Scope
 
-speculateOne(state, render) -> SpecView
+speculateOne(state, render, frame) -> SpecView
 speculate(states, render) -> seq[SpecView]
 rect(view, selector) -> Rect
 speculativeTargets(states, render, selector, origin) -> seq[DragTarget[S]]
+newDragZone(model, container, render, statesOf, selector, controller, snap)
 dispose(view)
 ```
 
@@ -1343,8 +1344,39 @@ dispose(view)
   candidate, measures the selected element, and returns `DragTarget`s whose
   `pos` is its center. `origin` is the live render root; its rect is added to
   the host-relative measurement, so browser targets and pointer events share
-  the client coordinate frame. `examples/ui/rows.nim` and `kanban.nim` use
-  this instead of manual `rowPoint`/`tilePoint`/`targetPoint` functions.
+  the client coordinate frame. The same rect sizes the hidden host
+  (`createHiddenHost(frame.w, frame.h)`), which is essential when a sibling
+  panel or a scrollbar constrains the live flex layout: the candidate host
+  must have the same frame, not shrink-wrap.
+- `DragZone[S]` packages the live model, container, view renderer, `statesOf`
+  and `selector` callbacks, controller and snap radius. `start(zone, p)` is the
+  only place that builds and measures candidate targets; `move(zone, p)`
+  updates the target and FLIPs only when it changes; `drop(zone)` finishes and
+  starts the grabbed element at the pointer/ghost center. Applications no longer
+  hand-roll `speculativeTargets`, capture/`flush`/play calls for every drag
+  kind.
+
+### Layout animation and overlay
+
+`layout.nim` is the FLIP layer:
+
+```nim
+captureLayout(root, ".card, .col", token)
+# mutate the model / re-render
+playLayout(root, ".card, .col", token, 160)
+```
+
+It records the old border boxes of elements with ids, then sets a linear
+`transform` from the old to the new position. It is a no-op on the C/test
+backend. `overlay.nim` renders the measured targets and the line graph between
+them as an SVG overlay (`setDragOverlay(true)`); it is debug-only and never
+affects layout.
+
+`withSnap(radius)` gives the behavior a sticky current target: the controller
+does not switch until the pointer leaves the radius around the current target.
+`between` still selects the nearest target; FLIP animates the transition
+between two preview layouts, while true multi-state interpolation remains the
+next layer.
 
 ### 5.12 Motion core
 

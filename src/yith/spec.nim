@@ -16,6 +16,8 @@
 import ./core
 import ./dsl
 import ./drag
+import ./overlay
+import ./layout
 import ./dom/api
 
 type
@@ -25,11 +27,13 @@ type
     scope*: Scope
 
 proc speculateOne*[S](state: S;
-                      render: proc (s: S): E {.closure.}): SpecView[S] =
+                      render: proc (s: S): E {.closure.};
+                      frame: Rect = Rect()): SpecView[S] =
   ## Render one state into a hidden, laid-out host. In the browser the host
   ## is attached with `visibility:hidden`, so CSS layout (flex, absolute
-  ## positioning, transforms) is real and `bounds` can measure it.
-  let root = createHiddenHost()
+  ## positioning, transforms) is real and `bounds` can measure it. `frame`
+  ## copies the live container's width/height when known.
+  let root = createHiddenHost(frame.w, frame.h)
   # A speculative view is only measured; registering its event handlers would
   # create live closures for a tree that is immediately disposed.
   let prevSuppressed = eventsSuppressed
@@ -66,6 +70,86 @@ proc rect*[S](v: SpecView[S]; selector: string): Rect =
   else:
     result = bounds(n)
 
+type
+  DragZone*[S] = ref object
+    ## A live container plus the rules for what it can become. The zone owns
+    ## speculative measurement (using the container's frame) and starts the
+    ## controller; the application still owns the view and the state rules.
+    model*: State[S]
+    container*: Node
+    render*: proc (s: S): E {.closure.}
+    statesOf*: proc (s: S): seq[S] {.closure.}
+    selector*: proc (s: S): string {.closure.}
+    grabbedSelector*: string
+    controller*: DragController[S]
+    snap*: float
+    startState*: S
+    animSelector*: string
+    token*: string
+    duration*: int
+
+proc newDragZone*[S](model: State[S]; container: Node;
+                     render: proc (s: S): E {.closure.};
+                     statesOf: proc (s: S): seq[S] {.closure.};
+                     selector: proc (s: S): string {.closure.};
+                     grabbedSelector: string;
+                     controller: DragController[S];
+                     snap: float = 0.0;
+                     animSelector = ".card, .col";
+                     duration = 160): DragZone[S] =
+  result = DragZone[S](model: model, container: container, render: render,
+                       statesOf: statesOf, selector: selector,
+                       grabbedSelector: grabbedSelector, controller: controller,
+                       snap: snap, animSelector: animSelector,
+                       token: "yith-drag", duration: duration)
+
+proc start*[S](z: DragZone[S]; p: Point) =
+  ## Render every state returned by `statesOf` in a host framed like the live
+  ## container, measure `selector(state)`, and start the controller.
+  let s = z.model.get()
+  let states = z.statesOf(s)
+  let targets = speculativeTargets(states, z.render, z.selector(s),
+                                   z.container)
+  z.controller.start(closest(targets).withSnap(z.snap).withFloating(), p)
+  z.startState = s
+  if dragOverlayEnabled:
+    showOverlay(targets)
+
+proc move*[S](z: DragZone[S]; p: Point): bool =
+  ## Update the pointer/target. Re-render and FLIP-animate only when the
+  ## chosen target actually changes.
+  if not z.controller.active.get():
+    return false
+  let prevTarget = z.controller.target.get()
+  let prevFar = z.controller.far.get()
+  discard z.controller.move(p)
+  result = z.controller.target.get() != prevTarget or
+           z.controller.far.get() != prevFar
+  if result:
+    if z.container != nil:
+      captureLayout(z.container, z.animSelector, z.token)
+    z.model.set(z.controller.previewState(z.startState))
+    flush()
+    if z.container != nil:
+      playLayout(z.container, z.animSelector, z.token, z.duration)
+
+proc drop*[S](z: DragZone[S]): S =
+  ## Finish the drag and animate the grabbed element from the pointer to its
+  ## new box; all other id'd elements FLIP from their old boxes.
+  let ghost = z.controller.pointer.get()
+  var next = z.startState
+  if z.controller.hasDrop():
+    next = z.controller.chosen().state
+  if z.container != nil:
+    captureLayout(z.container, z.animSelector, z.token)
+  discard z.controller.finish()
+  z.model.set(next)
+  flush()
+  if z.container != nil:
+    playDropLayout(z.container, z.animSelector, z.token, z.grabbedSelector,
+                   ghost.x, ghost.y, z.duration)
+  result = next
+
 proc centerOf(r: Rect): Point =
   result = Point(x: r.x + r.w / 2.0, y: r.y + r.h / 2.0)
 
@@ -87,13 +171,14 @@ proc speculativeTargets*[S](states: seq[S];
   result = @[]
   var ox = 0.0
   var oy = 0.0
+  var frame = Rect()
   if origin != nil:
-    let o = bounds(origin)
-    ox = o.x
-    oy = o.y
+    frame = bounds(origin)
+    ox = frame.x
+    oy = frame.y
   var i = 0
   while i < states.len:
-    let v = speculateOne(states[i], render)
+    let v = speculateOne(states[i], render, frame)
     let r = rect(v, selector)
     var p = centerOf(r)
     if origin != nil:
@@ -111,13 +196,14 @@ proc speculativeTargets*[S](states: seq[S];
   result = @[]
   var ox = 0.0
   var oy = 0.0
+  var frame = Rect()
   if origin != nil:
-    let o = bounds(origin)
-    ox = o.x
-    oy = o.y
+    frame = bounds(origin)
+    ox = frame.x
+    oy = frame.y
   var i = 0
   while i < states.len:
-    let v = speculateOne(states[i], render)
+    let v = speculateOne(states[i], render, frame)
     let r = rect(v, selector(states[i]))
     var p = centerOf(r)
     if origin != nil:

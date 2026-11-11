@@ -37,7 +37,9 @@ intended model of signals, DSL, slots and the drag-and-drop example is in
 | `async.nim` | passive effects without blocking the thread |
 | `fetch.nim` | `awaitText` on top of `fetch`/Promise |
 | `drag.nim` | model-driven drag controller: targets, closest, pointer, drop |
-| `spec.nim` | hidden DOM render/measure of target states (`speculativeTargets`) |
+| `spec.nim` | hidden DOM render/measure, `DragZone`, `speculativeTargets` |
+| `layout.nim` | FLIP layout animation for live DOM updates |
+| `overlay.nim` | debug dots/lines for measured drag targets |
 | `motion.nim` | tween/spring interpolation + style binding |
 
 Public facade: `import yith/ui`.
@@ -161,6 +163,8 @@ let dragCtl = newDragController[Board]()
 - `.whenFar(fallback, radius)` — if the nearest target is farther than the
   radius, use the fallback state (for example, a state without the element);
 - `.withFloating()` — mark the preview as floating;
+- `.withSnap(radius)` — keep the current target until the pointer moves
+  `radius` pixels away from it;
 - `start(drag, behavior, p)` / `start(drag, targets, p)`;
 - `move(drag, p)`, `finish(drag)`, `cancel(drag)`;
 - `hasDrop(drag)`, `chosen(drag)`;
@@ -178,6 +182,40 @@ While dragging, the application can assign `dragCtl.previewState(start)` to its
 model state. CSS reflows the actual elements to the preview arrangement, and a
 floating ghost is just a `position:fixed` element following the pointer. On
 drop, the chosen state stays; on cancel, the start state is restored.
+
+### DragZone
+
+`spec.DragZone` packages the repetitive part: it takes the live model, the
+live container, the same view render function, and two callbacks that describe
+what the grabbed element may become:
+
+```nim
+let zone = newDragZone(board, liveBoard,
+  proc (s: Board): E {.closure.} =
+    renderBoard(s, tmp, rc, t, ti),
+  proc (s: Board): seq[Board] {.closure.} =
+    buildDrag(s, taskId),
+  proc (s: Board): string {.closure.} =
+    "#task-" & $taskId,
+  dragCtl, snap = 24.0)
+zone.start(p)
+# pointermove:
+discard zone.move(p)
+# pointerup:
+discard zone.drop()
+```
+
+`zone.move` re-renders only when the chosen target changes and FLIP-animates
+the changed elements. `zone.drop` finishes the drag and animates the grabbed
+element from the pointer position (the ghost) to its final box; every other
+id'd element slides from its old box. The animation selector defaults to
+`.card, .col`, so column reorders animate too.
+
+The zone measures the container's frame and renders every candidate inside a
+hidden host of the **same width/height**. This is what keeps speculative flex
+layout correct when an inspector panel or another sibling constrains the live
+page. Without the frame, the hidden host shrink-wraps and the candidate boxes
+do not match the visible ones.
 
 Example `examples/ui/kanban.nim`:
 
@@ -205,10 +243,37 @@ tests/ui/run.sh
 nimony c -d:yithDomTest -p:src examples/ui/kanban.nim -o:bin/kanban && ./bin/kanban
 ```
 
-Limit: `between` still selects the nearest measured target instead of
-interpolating between DOM renders, and `lerpViews`/Delaunay from Dragology are
-not implemented yet. That is the next layer. `dropTarget`, `switchToStateAndFollow`, `vary` and
-`withSnapRadius` are missing too for now.
+### Layout animation
+
+When the target state changes, the live board is re-rendered and the changed
+elements slide linearly from their old boxes to the new ones (FLIP):
+
+```nim
+captureLayout(boardNode, ".card, .col", "board")
+board.set(nextState)
+flush()
+playLayout(boardNode, ".card, .col", "board", 160)
+```
+
+`layout.nim` is a no-op on the C/test backend. `DragZone.move` calls it only
+when the drop target changes, not on every pointer pixel. `DragZone.drop` uses
+`playDropLayout`, which starts the grabbed element at the pointer/ghost center
+and FLIPs all the other id'd elements.
+
+### Debug overlay
+
+```js
+NIF.setOverlay(true)
+```
+
+Draws the measured targets and the line graph between them over the page while
+dragging. It is removed on drop. `overlay.nim` renders the SVG from the target
+positions, so it is backend-local and does not affect layout.
+
+Limit: `between` still selects the nearest measured target; the FLIP transition
+animates the change between two preview layouts, but true multi-state
+interpolation and `lerpViews`/Delaunay from Dragology are not implemented yet.
+`dropTarget`, `switchToStateAndFollow` and `vary` are still missing.
 
 ### Browser
 
@@ -286,7 +351,9 @@ let targets = speculativeTargets(states, render, "#item-1", liveRoot)
 ```
 
 The component's normal CSS decides where each item lands; the drag code only
-reads the measured boxes. Pass the live root as `origin`: the hidden host sits
+reads the measured boxes. `origin` also sizes the hidden host to the live
+container's width/height, so constrained flex layouts measure the same boxes.
+Pass the live root as `origin`: the hidden host sits
 off-screen in the browser, so raw `getBoundingClientRect` values are shifted by
 that offset. `origin` moves the targets into the same client coordinate frame
 as pointer events. The C/test DOM backend re-roots every measurement at `0,0`,

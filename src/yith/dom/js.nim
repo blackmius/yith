@@ -33,6 +33,9 @@ proc setText*(n: Node; text: string) {.importjs: "#.nodeValue = #".}
 proc setProp*(n: Node; name, value: string) {.importjs: "#[#] = #".}
 proc setProp*(n: Node; name: string; value: bool) {.importjs: "#[#] = #".}
 proc setProp*(n: Node; name: string; value: int) {.importjs: "#[#] = #".}
+proc setHtml*(n: Node; html: string) {.importjs: "#.innerHTML = #".}
+proc appendToBody*(n: Node) =
+  appendChild(documentBody(), n)
 proc textContent*(n: Node): string {.importjs: "#.textContent".}
 proc preventDefault*(e: Event) {.importjs: "#.preventDefault()".}
 proc target*(e: Event): Node {.importjs: "#.target".}
@@ -108,12 +111,18 @@ proc bounds*(n: Node): Rect =
   result = Rect(x: rectLeft(n), y: rectTop(n),
                 w: rectWidth(n), h: rectHeight(n))
 
-proc createHiddenHost*(): Node =
+proc createHiddenHost*(width = -1.0; height = -1.0): Node =
   ## A hidden, laid-out container. `visibility: hidden` (not
   ## `display: none`) keeps CSS layout active so `getBoundingClientRect`
-  ## reports real geometry.
+  ## reports real geometry. The optional frame copies the live container's
+  ## width/height, so flex/percentage layouts cannot reflow differently just
+  ## because a side panel constrains the real page.
   result = createElement("div")
-  setAttribute(result, "style",
-    "position:absolute;left:-100000px;top:0;visibility:hidden;" &
-    "pointer-events:none;")
+  var style = "position:absolute;left:-100000px;top:0;visibility:hidden;" &
+              "pointer-events:none;box-sizing:border-box;"
+  if width > 0.0:
+    style.add "width:" & $width & "px;"
+  if height > 0.0:
+    style.add "height:" & $height & "px;"
+  setAttribute(result, "style", style)
   appendChild(documentBody(), result)

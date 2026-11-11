@@ -1166,17 +1166,59 @@ at n_drain_...
 at n_flush_...
 ```
 
-### Repro
-Build `examples/ui/kanban.nim` into JS:
+### Minimal repro
 
-```sh
-examples/ui/build_kanban_js.sh
-node /tmp/ni/kanban_browser_events_async.js examples/ui/kanban.js
+No yith code is needed. A JS host binding declared as `ref object` is already
+wrong: `importjs` bridges the value as an int32 handle (`ewrap`), while ARC
+treats the same field as a heap cell.
+
+`handle_arc.nim`:
+
+```nim
+{.feature: "lenientnils".}
+{.feature: "assumeSync".}
+import std/syncio
+
+type Node = ref object
+
+proc mk(): Node {.importjs: "({})".}
+
+var s: seq[Node] = @[]
+var i = 0
+while i < 20000:
+  s.add mk()
+  inc i
+echo "len=", s.len
+s.setLen 0
+echo "ok"
 ```
 
-The initial board renders. After a simulated card drop the first flush crashes
-while disposing the old `uiBlock` subtree. The same example works on the C/test
-DOM backend (`examples/ui/kanban.nim`).
+Build and run:
+
+```sh
+nimony j handle_arc.nim
+node "$(find nimcache/j -name handle_arc.js | head -1)"
+```
+
+Actual:
+
+```text
+RangeError: Offset is outside the bounds of the DataView
+  at DataView.prototype.getUint32
+  at n_addToSharedFreeList
+  at n_rawDealloc
+  at n_deallocFixed
+  at n_setLen (the seq[Node] shrink)
+```
+
+With only a few handles the corruption is silently written into low static
+memory; around 20000 handles one lands on a chunk header whose size field makes
+`rawDealloc` index outside the `ArrayBuffer`.
+
+### In the yith example
+Build `examples/ui/kanban.nim` into JS; after a card drop the old `uiBlock`
+subtree is disposed and the same `setLen`/`dealloc` path runs on `Scope.nodes`
+(`seq[Node]`). The example works on the C/test DOM backend.
 
 ### Root cause
 `importjs` represents a host JS value as an int32 **handle** into the host
@@ -1222,23 +1264,41 @@ This is what remained after the opaque-handle fix (#27): the handle itself was
 no longer reference counted, but the per-render `computedExpr` state still was.
 
 ### Workaround
-`css.*` and `cls.*` state-reading values, and state-reading `Text(...)`
-arguments, are lowered to **lazy getters**:
+`css.*`, `cls.*`, `attr.*` and state-reading `Text(...)` expressions are
+lowered through a **named** helper:
 
 ```nim
 css.left($dragCtl.pointer.get().x & "px")
-# -> addStyle(e, "left", proc (): string = ...)
+# -> addStyle(e, "left", watchValue(proc (): string = ...))
 
 Text(board.get().columns[ci].title)
-# -> Text(proc (): string = $...)
+# -> Text(watchValue(proc (): string = $...))
 ```
 
-`addStyle`/`addClass` store the getter in the `StylePart`/`ClassPart`; `setAttr`,
-`setBoolAttr` and `Text` evaluate their getter from an effect. No derived
-`State` is created at the call site, so there is no env slot to dangle.
-`prop`/`setProp` with a state-reading *expression* still goes through
-`computedExpr`; state-typed props (`State[T]`) are unaffected.
+`watchValue` is a normal proc that owns the derived `State` in its own frame:
+
+```nim
+proc watchValue*[T](f: proc (): T {.closure.}): State[T] =
+  let initial = withoutTracking:
+    f()
+  result = newState(initial)
+  discard effect(proc () {.closure.} =
+    result.set(f()))
+```
+
+The state and its effect closure are created inside `watchValue`, not at the
+attribute call site, so closure conversion cannot hoist a slot into the
+enclosing component environment. `addStyle`/`addClass`/`setAttr` store the
+returned `State` in the usual `StylePart`/`ClassPart`; `Text(State[T])` keeps
+its existing effect. `prop`/`setProp` with a state-reading *expression* still
+uses `computedExpr`; state-typed props are unaffected.
 `tests/ui/js_lazy.nim` covers repeated show/hide/re-render.
+
+### Minimal repro status
+No self-contained compiler repro yet. The failure needs the exact nested
+closure-environment shape produced by a re-runnable component body plus an
+attribute closure; the yith workaround removes that shape. This entry is kept
+as a yith-level note rather than a filed Nimony issue.
 
 ## 29. JS: scope ref cycles caused recursive destruction and lost DOM nodes
 
@@ -1301,6 +1361,102 @@ Four more leaks showed up under long interactions and are also fixed in yith:
 
 `State.set` also logs each visited `Sub` in the debug build (`set visit`) so a
 dangling link is visible right before the crash.
+
+**Only the last bullet is a Nimony issue** (see #30). The first three are
+yith runtime/design bugs (subscription ownership, handler tracking, and
+speculative event registration); they were fixed in `src/yith/core.nim`,
+`src/yith/dsl.nim`, `src/yith/dom/js.nim` and `src/yith/spec.nim`, not in the
+compiler. They are listed here only as context for what the runtime has to do
+around the JS backend.
+
+## 30. JS: a host exception through Nimony frames leaks the shadow stack
+
+**Labels:** bug, js-backend, runtime, memory, exceptions
+**Severity:** high (long-lived event-driven pages eventually hit
+`stack overflow` or corrupt the allocator)
+**Status:** open on the current Nimony HEAD; worked around in yith.
+
+### Summary
+Nimony's JS backend lowers its own `raise`/`try` with landing pads that restore
+the shadow stack (`SP`/`_SPF`). A **host** exception thrown by an `importjs`
+splice (or by the DOM, a callback, `JSON.parse`, `getBoundingClientRect` on a
+detached node, an out-of-memory error, …) has no landing pad. It unwinds through
+Nimony frames without executing their `leave()`, so every such exception
+permanently leaks those frames.
+
+### Minimal repro
+
+`stack_leak.nim`:
+
+```nim
+proc stackDepth(): int {.importjs: "_SPF.length".}
+proc throwHost() {.importjs: "(function(){ throw new Error(\"host\"); })()".}
+
+proc inner() =
+  var xs = @[1, 2, 3]
+  throwHost()
+  discard xs
+
+proc outer() =
+  var ys = @[4, 5, 6]
+  inner()
+  discard ys
+
+proc depth(): int {.exportc: "depth".} =
+  result = stackDepth()
+
+proc boom() {.exportc: "boom".} =
+  outer()
+```
+
+`stack_leak.js`:
+
+```js
+require(process.argv[2]);
+console.log("before", NIF.depth());
+for (let i = 0; i < 5; i++) {
+  try { NIF.boom(); } catch (e) { console.log("caught", e.message); }
+}
+console.log("after", NIF.depth());
+```
+
+Build and run:
+
+```sh
+nimony j --browser stack_leak.nim
+node stack_leak.js "$(find nimcache/j -name stack_leak.js | head -1)"
+```
+
+Actual:
+
+```text
+before 0
+caught host
+caught host
+caught host
+caught host
+caught host
+after 5
+```
+
+Expected: `after 0`. Each caught host error leaves one `_SPF` entry behind
+(and lowers `SP` by the frame size). Cast the same pattern to an event callback
+and a page that throws a few thousand times exhausts the 1 MiB shadow stack:
+
+```text
+new Error("stack overflow")  // thrown by frame() when f < SP_MIN
+```
+
+### Workaround used by yith
+The event bridge records `SP` and `_SPF.length` after the initial render and
+restores them in a `finally` around every outermost DOM callback
+(`src/yith/dom/js.nim`, `jsEnsure`/`captureStackBase`). That contains leaks at
+the event boundary, but it does not help exceptions raised inside ordinary
+Nimony calls.
+
+The backend fix should make `frame`/`leave` exception-safe (a JS `try`/`finally`
+at each framed function, or a host-callback trampoline that saves/restores
+`SP`/`_SPF`), so host exceptions cannot leak the shadow stack.
 
 ---
 

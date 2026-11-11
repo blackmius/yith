@@ -783,7 +783,8 @@ proc emitCall(n: var NifCursor; b: var NifBuilder) =
   # Explicit state API: keep the receiver as is, rewrite the other arguments.
   if fnName == "get" or fnName == "set" or fnName == "update" or
      fnName == "peek" or fnName == "stateValue" or
-     fnName == "subscriberCount" or fnName == "signalId":
+     fnName == "subscriberCount" or fnName == "signalId" or
+     fnName == "newDragZone":
     b.openTree(n.tagId, n.info)
     b.takeTree fn
     var a = args

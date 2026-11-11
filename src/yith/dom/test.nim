@@ -57,6 +57,12 @@ proc scheduleMicrotask*(cb: proc () {.nimcall.}) =
 proc createElement*(tag: string): Node =
   result = Node(kind: nkElement, tag: tag)
 
+proc setHtml*(n: Node; html: string) =
+  discard
+
+proc appendToBody*(n: Node) =
+  discard
+
 proc createTextNode*(text: string): Node =
   result = Node(kind: nkText, text: text)
 
@@ -514,6 +520,6 @@ proc bounds*(n: Node): Rect =
   placeNode(root, 0.0, 0.0)
   result = n.computed
 
-proc createHiddenHost*(): Node =
+proc createHiddenHost*(width = -1.0; height = -1.0): Node =
   result = createElement("div")
   setAttribute(result, "style", "position:absolute;left:-100000px;top:0;")
