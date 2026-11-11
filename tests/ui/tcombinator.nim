@@ -2,7 +2,6 @@
 ## events, mount/cleanup and indentation children.
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
 proc View(count, mounted, cleaned: State[int]): E {.ui.} =
@@ -13,7 +12,7 @@ proc View(count, mounted, cleaned: State[int]): E {.ui.} =
       prop.title("hello").tabIndex(3)
       onClick(e):
         count += 1
-      onMount(e: El):
+      onMount(e):
         mounted.set(stateValue(mounted) + 1)
       onCleanup():
         cleaned.set(stateValue(cleaned) + 1)
@@ -23,9 +22,9 @@ proc View(count, mounted, cleaned: State[int]): E {.ui.} =
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let count = state(0)
-let mounted = state(0)
-let cleaned = state(0)
+let count = newState(0)
+let mounted = newState(0)
+let cleaned = newState(0)
 let view = View(count, mounted, cleaned)
 echo toHtml(root)
 let btn = find(root, ".btn-default")

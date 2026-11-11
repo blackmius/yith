@@ -1,4 +1,3 @@
-{.rewriteModule("../../src/yith/uiblock_plugin").}
 
 import std/syncio
 import yith/ui

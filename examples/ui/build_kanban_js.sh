@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the browser kanban demo. The app itself is runtime-DSL because the
-# `{.ui.}` macro cannot target JS yet (std/macros issue #25).
+# Build the browser kanban demo. The app itself uses the low-level runtime
+# primitives so the same wrapper also exercises the browser DOM bindings.
 # Known: the initial board renders; drop currently hits issue #27 (JS
 # scope teardown/DataView crash).
 set -euo pipefail

@@ -1,11 +1,10 @@
-{.rewriteModule("../../src/yith/uiblock_plugin").}
 {.feature: "assumeSync".}
 
 import std/syncio
 import yith/ui
 import yith/dom/api
 
-var theme {.state.}: string = "light"
+var theme {.state.}: string = state("light")
 
 proc View(): E {.ui.} =
   c.Div.root:

@@ -1,16 +1,30 @@
-## Plugin-native UI wrapper.
+## `{.ui.}` / `ui:` syntax entry point.
 ##
-## Nimony plugins cannot (yet) occupy a proc-pragma slot like `{.ui.}`, so the
-## plugin entry point is a block:
+## Two passes are involved:
 ##
-##   import yith/uiblock
+## 1. `uiblock_plugin` (a template plugin) turns `c.Tag.class:` blocks into
+##    ordinary `uiBlock`/`uiWhen`/`uiLoop` calls. It runs before the body is
+##    semchecked, but leaves `{.state.}` alone.
+## 2. `state_plugin` (a type plugin triggered by the hook emitted in pass 1)
+##    rewrites `{.state.}` declarations and uses to `State[T]` + `get`/`set`
+##    after sem.
+##
+## Both passes are enabled by importing this module and writing:
+##
+##   import yith/ui
+##
+##   proc View(): E {.ui.} =
+##     c.Div.card:
+##       "hello"
+##
+## The same template can be used as a block:
+##
 ##   ui:
 ##     proc View(): E =
 ##       c.Div.card:
 ##         "hello"
-##
-## The plugin receives the block as untyped NIF before sem and emits the same
-## runtime calls the old macro emitted. This is the migration path away from
-## std/macros.
 
-template ui*(body: untyped) {.plugin: "uiblock_plugin".}
+import ./internal
+export internal
+
+template ui*(def: untyped) {.plugin: "uiblock_plugin".}

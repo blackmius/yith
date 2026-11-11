@@ -110,7 +110,7 @@ proc apply*(m: Motion) =
   m.styleState.set(s)
 
 proc bindMotion*(e: E; initial: MotionProps): Motion =
-  result = Motion(styleState: state(""), current: initial, target: initial,
+  result = Motion(styleState: newState(""), current: initial, target: initial,
                   transition: tween())
   addStyle(e, result.styleState)
   result.apply()

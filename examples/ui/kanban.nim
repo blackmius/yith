@@ -13,7 +13,6 @@
 
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 import ./kanban_model
 
@@ -39,7 +38,7 @@ proc ColumnView*(board: State[Board]; dragCtl: DragController[Board];
                  dragTask: State[int]; dragTitle: State[string];
                  ci: int): E {.ui.} =
   c.Div.col:
-    cls.drop(isDropColumn(dragCtl, dragTask, ci))
+    cls.drop(isDropColumn(dragCtl, dragTask.get(), ci))
     c.Div.col_head:
       attr.id("col-" & board.get().columns[ci].id)
       onPointerDown(e):
@@ -83,10 +82,10 @@ proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
 
 let root1 = createElement("div")
 let sc1 = beginRoot(root1)
-let board1 = state(initialBoard())
+let board1 = newState(initialBoard())
 let drag1 = newDragController[Board]()
-let dragTask1 = state(0)
-let dragTitle1 = state("")
+let dragTask1 = newState(0)
+let dragTitle1 = newState("")
 let view1 = KanbanView(board1, drag1, dragTask1, dragTitle1)
 
 let card = find(root1, "#task-1")
@@ -104,10 +103,10 @@ dispose(sc1)
 # Scenario 2: column Todo moves to index 2.
 let root2 = createElement("div")
 let sc2 = beginRoot(root2)
-let board2 = state(initialBoard())
+let board2 = newState(initialBoard())
 let drag2 = newDragController[Board]()
-let dragTask2 = state(0)
-let dragTitle2 = state("")
+let dragTask2 = newState(0)
+let dragTitle2 = newState("")
 let view2 = KanbanView(board2, drag2, dragTask2, dragTitle2)
 
 let todoHead = find(root2, "#col-todo")

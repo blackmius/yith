@@ -14,7 +14,7 @@ type
     value: State[T]
 
 proc field[T](v: T): FieldRef[T] =
-  FieldRef[T](value: state(v))
+  FieldRef[T](value: newState(v))
 
 proc get[T](f: FieldRef[T]): T =
   f.value.get()

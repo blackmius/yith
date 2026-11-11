@@ -7,7 +7,7 @@
 ##   `refetch` is called. A generation counter drops late responses.
 ##
 ## `mutate` updates the Ready data in place; the reactive `case user:` lives
-## in `uipragma` (it rewrites to `uiCaseBlock`).
+## by the `{.ui.}` syntax pass (it rewrites to `uiCaseBlock`).
 ##
 ## `ResourceValue` carries only the kind. The payloads (`data`, `error`) are
 ## separate states on the handle: on the JS backend a generic `State[T]`
@@ -43,14 +43,14 @@ type
 
 proc setReady[T](r: Resource[T]; v: T) =
   if r.data == nil:
-    r.data = state(v)
+    r.data = newState(v)
   else:
     r.data.set(v)
   r.value.set(ResourceValue[T](kind: resReady))
 
 proc setError[T](r: Resource[T]; msg: string) =
   if r.error == nil:
-    r.error = state(ErrorInfo(message: msg))
+    r.error = newState(ErrorInfo(message: msg))
   else:
     r.error.set(ErrorInfo(message: msg))
   r.value.set(ResourceValue[T](kind: resError))
@@ -70,7 +70,7 @@ proc load[T](r: Resource[T]) =
 
 proc resource*[T](fetcher: proc (): T {.closure.}): Resource[T] =
   result = Resource[T](
-    value: state(ResourceValue[T](kind: resLoading)),
+    value: newState(ResourceValue[T](kind: resLoading)),
     fetcher: fetcher)
   load(result)
 
@@ -79,8 +79,8 @@ proc resource*[T](fetcher: proc (): T {.passive.}): Resource[T] =
   ## scope: signals read before the first `await` subscribe it, and the same
   ## effect restarts (with a new generation) on source changes/`refetch`.
   result = Resource[T](
-    value: state(ResourceValue[T](kind: resLoading)),
-    refresh: state(0))
+    value: newState(ResourceValue[T](kind: resLoading)),
+    refresh: newState(0))
   let r = result
   r.scope = effectPassive(proc () {.passive, closure.} =
     discard r.refresh.get()
@@ -131,14 +131,14 @@ type
 
 proc setReady[T, A](r: ArgResource[T, A]; v: T) =
   if r.data == nil:
-    r.data = state(v)
+    r.data = newState(v)
   else:
     r.data.set(v)
   r.value.set(ResourceValue[T](kind: resReady))
 
 proc setError[T, A](r: ArgResource[T, A]; msg: string) =
   if r.error == nil:
-    r.error = state(ErrorInfo(message: msg))
+    r.error = newState(ErrorInfo(message: msg))
   else:
     r.error.set(ErrorInfo(message: msg))
   r.value.set(ResourceValue[T](kind: resError))
@@ -146,8 +146,8 @@ proc setError[T, A](r: ArgResource[T, A]; msg: string) =
 proc resource*[T, A](fetcher: proc (a: A): T {.closure.};
                      arg: A): ArgResource[T, A] =
   result = ArgResource[T, A](
-    value: state(ResourceValue[T](kind: resLoading)),
-    arg: state(arg),
+    value: newState(ResourceValue[T](kind: resLoading)),
+    arg: newState(arg),
     fetcher: fetcher)
   try:
     setReady(result, result.fetcher(arg))
@@ -157,9 +157,9 @@ proc resource*[T, A](fetcher: proc (a: A): T {.closure.};
 proc resource*[T, A](fetcher: proc (a: A): T {.passive.};
                      arg: A): ArgResource[T, A] =
   result = ArgResource[T, A](
-    value: state(ResourceValue[T](kind: resLoading)),
-    arg: state(arg),
-    refresh: state(0))
+    value: newState(ResourceValue[T](kind: resLoading)),
+    arg: newState(arg),
+    refresh: newState(0))
   let r = result
   r.scope = effectPassive(proc () {.passive, closure.} =
     discard r.refresh.get()

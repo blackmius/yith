@@ -1,9 +1,9 @@
+{.feature: "assumeSync".}
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
-proc ListView(items: State[seq[int]];
+proc ListView(items {.state.}: seq[int];
               renders: State[int]): E {.ui.} =
   c.Div.list:
     for item in items:
@@ -14,22 +14,22 @@ proc ListView(items: State[seq[int]];
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let items = state(@[1, 2, 3])
-let renders = state(0)
+var items {.state.}: seq[int] = @[1, 2, 3]
+let renders = newState(0)
 let view = ListView(items, renders)
 echo toHtml(root)
 echo "r=", renders.get()
-items.set(@[3, 1])
+items = @[3, 1]
 echo toHtml(root)
 echo "r=", renders.get()
-items.set(@[2, 3, 1])
+items = @[2, 3, 1]
 echo toHtml(root)
 echo "r=", renders.get()
 endRoot()
 dispose(sc)
 
 proc LocalView(renders: State[int]): E {.ui.} =
-  let items = state(@[10, 20, 30])
+  var items {.state.}: seq[int] = @[10, 20, 30]
   c.Div.local:
     for item in items:
       key item
@@ -39,7 +39,7 @@ proc LocalView(renders: State[int]): E {.ui.} =
 
 let root2 = createElement("div")
 let sc2 = beginRoot(root2)
-let renders2 = state(0)
+let renders2 = newState(0)
 let view2 = LocalView(renders2)
 echo toHtml(root2)
 echo "lr=", renders2.get()
@@ -48,7 +48,7 @@ endRoot()
 dispose(sc2)
 
 proc LocalTypedView(): E {.ui.} =
-  let items: State[seq[string]] = state(@["u", "v"])
+  var items {.state.}: seq[string] = @["u", "v"]
   c.Div.typed:
     for item in items:
       key item

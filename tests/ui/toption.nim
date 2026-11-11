@@ -8,7 +8,7 @@ type User = object
 let u: Option[User] = none[User]()
 echo u.isSome
 
-let n = state(none[int]())
+let n = newState(none[int]())
 echo n.get().isSome
 n.set(some(3))
 echo n.get().get()

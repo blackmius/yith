@@ -1,4 +1,5 @@
-{.rewriteModule("../../src/yith/uiblock_plugin").}
+{.plugin: "yith/state_plugin".}
+
 
 import yith/core
 

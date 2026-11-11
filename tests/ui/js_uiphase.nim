@@ -1,4 +1,3 @@
-{.rewriteModule("../../src/yith/uiblock_plugin").}
 {.feature: "assumeSync".}
 
 import std/syncio

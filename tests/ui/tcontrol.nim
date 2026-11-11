@@ -1,9 +1,9 @@
+{.feature: "assumeSync".}
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
-proc View(open: State[bool]; items: State[seq[int]]): E {.ui.} =
+proc View(open {.state.}: bool; items {.state.}: seq[int]): E {.ui.} =
   c.Div.v:
     if open:
       c.Span.open:
@@ -17,13 +17,13 @@ proc View(open: State[bool]; items: State[seq[int]]): E {.ui.} =
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let open = state(true)
-let items = state(@[1, 2])
+var open {.state.}: bool = true
+var items {.state.}: seq[int] = @[1, 2]
 let view = View(open, items)
 echo toHtml(root)
-open.set(false)
+open = false
 echo toHtml(root)
-items.set(@[3, 4])
+items = @[3, 4]
 echo toHtml(root)
 endRoot()
 dispose(sc)

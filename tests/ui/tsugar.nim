@@ -1,10 +1,10 @@
+{.feature: "assumeSync".}
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
 proc Counter(): E {.ui.} =
-  let count = state(0)
+  let count = newState(0)
   c.Div.counter:
     c.Span.n:
       count
@@ -13,7 +13,7 @@ proc Counter(): E {.ui.} =
         count += 1
       "inc"
 
-proc Toggle(open: State[bool]): E {.ui.} =
+proc Toggle(open {.state.}: bool): E {.ui.} =
   c.Button.toggle:
     onClick(e):
       open = false
@@ -38,7 +38,7 @@ proc total(xs: seq[int]): int =
     inc i
   result = total
 
-proc ListView(list: State[seq[int]]): E {.ui.} =
+proc ListView(list {.state.}: seq[int]): E {.ui.} =
   c.Span.len:
     Text(list.len)
   c.Span.len2:
@@ -53,15 +53,15 @@ proc ListView(list: State[seq[int]]): E {.ui.} =
     "add"
 
 proc MutView(): E {.ui.} =
-  let m = state(0)
+  let m = newState(0)
   c.Span.m:
     m
   c.Button.mbtn:
     onClick(e):
-      m.bump()
+      m += 10
     "m"
 
-let globalCount = state(0)
+let globalCount = newState(0)
 
 proc GlobalView(): E {.ui.} =
   c.Span.global:
@@ -74,21 +74,21 @@ proc GlobalView(): E {.ui.} =
 let root = createElement("div")
 let sc = beginRoot(root)
 let counter = Counter()
-let open = state(true)
+var open {.state.}: bool = true
 let toggle = Toggle(open)
 let mutv = MutView()
-let xs = state(@[1, 2])
+var xs {.state.}: seq[int] = @[1, 2]
 let lv = ListView(xs)
 let gv = GlobalView()
 echo toHtml(root)
 echo fire(find(root, ".inc"), "click")
 echo toHtml(root)
 echo fire(find(root, ".toggle"), "click")
-echo "open=", open.get()
+echo "open=", open
 echo fire(find(root, ".ginc"), "click")
 echo fire(find(root, ".mbtn"), "click")
 echo fire(find(root, ".ladd"), "click")
-echo "len=", xs.get().len
+echo "len=", xs.len
 echo toHtml(root)
 endRoot()
 dispose(sc)

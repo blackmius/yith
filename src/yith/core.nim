@@ -76,12 +76,21 @@ proc subscriberCount*[T](s: State[T]): int =
     if not it.dead: inc result
     it = it.next
 
-proc state*[T](v: T): State[T] =
-  result = State[T](sig: Signal(), value: v)
+template state*() {.pragma.}
+  ## Marks a declaration (or parameter) as reactive. A pre-sem pass lowers the
+  ## UI syntax, then a module plugin rewrites `{.state.}` to `State[T]` and
+  ## every read/write of the name to `get`/`set`.
 
-proc signal*[T](v: T): State[T] =
-  ## Alias used by the design examples.
-  result = state(v)
+proc state*[T](v: T): T =
+  ## Identity placeholder used while `{.state.}` code is still seen as plain
+  ## values by the first semantic pass. The state plugin replaces it with
+  ## `newState` when it rewrites the declaration.
+  result = v
+
+proc newState*[T](v: T): State[T] =
+  ## The real reactive constructor. Runtime modules use this explicitly; the
+  ## state plugin emits it for `{.state.}` declarations.
+  result = State[T](sig: Signal(), value: v)
 
 proc get*[T](s: State[T]): T =
   if tracking and current != nil and not current.dead:
@@ -128,7 +137,7 @@ type
     scope*: Scope
 
 proc computed*[T](f: proc (): T {.closure.}): Computed[T] =
-  result = Computed[T](state: state(f()))
+  result = Computed[T](state: newState(f()))
   result.scope = effect(proc () {.closure.} =
     result.state.set(f()))
 
@@ -152,7 +161,7 @@ template computedExpr*(expr: untyped): untyped =
   ## dependency edges.
   block:
     let computedState = withoutTracking:
-      state(expr)
+      newState(expr)
     discard effect(proc () {.closure.} =
       computedState.set(expr))
     computedState

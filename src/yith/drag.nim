@@ -34,10 +34,10 @@ type
 
 proc newDragController*[S](): DragController[S] =
   result = DragController[S](
-    pointer: state(Point(x: 0.0, y: 0.0)),
-    active: state(false),
-    target: state(-1),
-    far: state(false))
+    pointer: newState(Point(x: 0.0, y: 0.0)),
+    active: newState(false),
+    target: newState(-1),
+    far: newState(false))
 
 proc dist2(a, b: Point): float =
   let dx = a.x - b.x

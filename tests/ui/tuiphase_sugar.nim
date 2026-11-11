@@ -1,4 +1,3 @@
-{.rewriteModule("../../src/yith/uiblock_plugin").}
 
 import std/syncio
 import yith/ui
@@ -17,12 +16,12 @@ proc View(name {.state.}: string; count {.state.}: int): E {.ui.} =
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let name = state("Ann")
-let count = state(0)
+var name {.state.}: string = "Ann"
+var count {.state.}: int = 0
 discard View(name, count)
 echo toHtml(root)
 echo "fired=", fire(find(root, ".btn"), "click")
 echo toHtml(root)
-echo "count=", count.get()
+echo "count=", count
 endRoot()
 dispose(sc)

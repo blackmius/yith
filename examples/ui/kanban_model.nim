@@ -118,14 +118,14 @@ proc columnOfTask*(b: Board; id: int): int =
     inc ci
 
 
-proc isDropColumn*(dragCtl: DragController[Board]; taskId: State[int];
+proc isDropColumn*(dragCtl: DragController[Board]; taskId: int;
                    ci: int): bool =
-  if not dragCtl.active.get() or taskId.get() == 0:
+  if not dragCtl.active.get() or taskId == 0:
     return false
   let idx = dragCtl.target.get()
   if idx < 0 or idx >= dragCtl.targets.len:
     return false
-  result = columnOfTask(dragCtl.targets[idx].state, taskId.get()) == ci
+  result = columnOfTask(dragCtl.targets[idx].state, taskId) == ci
 
 proc columnIndex*(b: Board; id: string): int =
   result = -1

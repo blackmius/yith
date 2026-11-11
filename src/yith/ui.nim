@@ -5,4 +5,5 @@ import ./resource
 import ./drag
 import ./motion
 import ./spec
-export dsl, context, resource, drag, motion, spec
+import ./uiblock
+export dsl, context, resource, drag, motion, spec, uiblock

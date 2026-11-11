@@ -8,7 +8,7 @@ proc main() =
   let root = createElement("div")
   let sc = beginRoot(root)
 
-  let n = state(0)
+  let n = newState(0)
   uiBlock(proc () {.closure.} =
     Text("count=" & $n.get()))
 

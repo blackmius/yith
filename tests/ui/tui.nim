@@ -4,7 +4,7 @@ import yith/dom/api
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let n = state(0)
+let n = newState(0)
 uiBlock(proc () {.closure.} =
   Box(className = "x"):
     Text("n=" & $n.get()))

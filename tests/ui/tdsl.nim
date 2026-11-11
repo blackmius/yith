@@ -8,10 +8,10 @@ proc main() =
   let root = createElement("div")
   let sc = beginRoot(root)
 
-  let n = state(0)
-  let open = state(false)
-  let training = state(7)
-  let items = state(@[1, 2, 3])
+  let n = newState(0)
+  let open = newState(false)
+  let training = newState(7)
+  let items = newState(@[1, 2, 3])
 
   var hits = 0
 

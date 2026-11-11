@@ -1,8 +1,7 @@
 ## Browser wrapper for the kanban declarative-drag example.
 ##
-## The `{.ui.}` macro cannot yet target the JS backend (issue #25:
-## std/macros), so this wrapper builds the same model-driven drag with the
-## low-level runtime primitives. Build with:
+## Browser wrapper for the same model-driven drag, built with the low-level
+## runtime primitives. Build with:
 ##   examples/ui/build_kanban_js.sh
 
 {.feature: "assumeSync".}
@@ -14,10 +13,10 @@ import yith/dsl
 import yith/drag
 import ./kanban_model
 
-var board: State[Board] = state(initialBoard())
+var board: State[Board] = newState(initialBoard())
 var dragCtl: DragController[Board] = newDragController[Board]()
-var dragTask: State[int] = state(0)
-var dragTitle: State[string] = state("")
+var dragTask: State[int] = newState(0)
+var dragTitle: State[string] = newState("")
 
 proc cardView(board: State[Board]; dragCtl: DragController[Board];
               dragTask: State[int]; dragTitle: State[string];
@@ -90,10 +89,10 @@ proc debugState() {.exportc: "debugState".} =
   flushFile(stdout)
 
 proc start(parent: Node) {.exportc: "start".} =
-  board = state(initialBoard())
+  board = newState(initialBoard())
   dragCtl = newDragController[Board]()
-  dragTask = state(0)
-  dragTitle = state("")
+  dragTask = newState(0)
+  dragTitle = newState("")
   discard beginRoot(parent)
   discard boardView(board, dragCtl, dragTask, dragTitle)
   flushFile(stdout)

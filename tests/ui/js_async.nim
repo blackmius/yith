@@ -14,8 +14,8 @@ var flag: State[bool]
 proc start() {.exportc: "start".} =
   root = createElement("div")
   let sc = beginRoot(root)
-  text = state("loading")
-  flag = state(false)
+  text = newState("loading")
+  flag = newState(false)
   effect:
     let s = awaitText("data:text/plain,hello")
     text.set s

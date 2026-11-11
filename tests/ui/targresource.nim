@@ -4,7 +4,6 @@
 
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
 proc Card(data: State[string]): E {.ui.} =

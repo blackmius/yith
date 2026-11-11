@@ -11,7 +11,6 @@
 
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
 type
@@ -232,7 +231,7 @@ proc RowsView*(model: State[Sheet]; dragCtl: DragController[Sheet];
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let model = state(Sheet(rows: @[
+let model = newState(Sheet(rows: @[
   Row(id: "row1", color: "#f0f4ff", items: @[
     Tile(id: "A1", label: "A1"), Tile(id: "B1", label: "B1"),
     Tile(id: "C1", label: "C1")]),
@@ -243,8 +242,8 @@ let model = state(Sheet(rows: @[
     Tile(id: "A3", label: "A3"), Tile(id: "B3", label: "B3"),
     Tile(id: "C3", label: "C3")])]))
 let dragCtl = newDragController[Sheet]()
-let dragLabel = state("")
-let dragColor = state("")
+let dragLabel = newState("")
+let dragColor = newState("")
 let view = RowsView(model, dragCtl, dragLabel, dragColor)
 
 echo toHtml(root)

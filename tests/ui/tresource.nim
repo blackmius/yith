@@ -1,6 +1,5 @@
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
 proc UserCard(data: State[string]): E {.ui.} =
@@ -20,7 +19,7 @@ proc User(user: Resource[string]): E {.ui.} =
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let source = state("Ann")
+let source = newState("Ann")
 let user = resource(proc (): string = source.get())
 let view = User(user)
 echo toHtml(root)

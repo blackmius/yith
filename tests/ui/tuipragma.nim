@@ -1,9 +1,8 @@
 import std/syncio
 import yith/ui
-import yith/uipragma
 import yith/dom/api
 
-let cleaned = state(false)
+let cleaned = newState(false)
 
 proc Panel(children: proc () {.closure.}): E {.ui.} =
   c.Div.panel:
@@ -66,15 +65,15 @@ proc Card(name: State[string]; active: State[bool];
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let name = state("Bob")
-let active = state(true)
-let clicks = state(0)
-let styleState = state("red")
+let name = newState("Bob")
+let active = newState(true)
+let clicks = newState(0)
+let styleState = newState("red")
 let card = Card(name, active, clicks)
 let styled = Styled(styleState)
 let pair = Pair()
 let page = Page()
-let n = state(2)
+let n = newState(2)
 let c = computed(proc (): int = n.get() * 2)
 let cv = ComputedView(c)
 echo toHtml(root)

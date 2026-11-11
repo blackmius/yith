@@ -19,7 +19,7 @@ import ./component
 import ./dom/api
 import ./internal
 
-export core, component
+export core, component, internal
 
 # ------------------------------------------------------------------ primitives
 
@@ -323,6 +323,31 @@ proc uiBlock*(body: proc () {.closure.}): E {.yithInternal, discardable.} =
   sc.run = body
   runScope(sc)
   result = E(scope: sc)
+
+proc uiBlock*(tag: string; attrs: proc (e: E) {.closure.};
+              children: proc () {.closure.}): E {.yithInternal, discardable.} =
+  ## The form emitted by the `{.ui.}` syntax pass for `c.Tag.class:`:
+  ## create the element, run the attribute/event closure against it, then run
+  ## the children closure with the element as the current parent.
+  let n = openNode(tag)
+  let outer = current
+  let prevParent = outer.domParent
+  let prevBefore = outer.domBefore
+  let e = E(scope: outer, startNode: n, endNode: nil)
+  outer.domParent = n
+  outer.domBefore = nil
+  if attrs != nil:
+    attrs(e)
+  children()
+  outer.domParent = prevParent
+  outer.domBefore = prevBefore
+  result = e
+
+proc uiKey*[T](value: T) {.discardable.} =
+  ## Marker emitted by the `for ...: key expr` syntax pass. The state plugin
+  ## consumes it when it turns the loop into `forEachList`.
+  discard value
+
 
 proc uiLoop*(body: proc () {.closure.}): E {.yithInternal, discardable.} =
   result = uiBlock(body)

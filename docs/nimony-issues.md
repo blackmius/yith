@@ -1,3 +1,8 @@
+> **Historical note.** References to `uipragma.nim`, `std/macros` and the
+> `{.ui.}` macro in this file describe the pre-two-pass implementation. yith
+> now uses two Nimony plugins (`uiblock_plugin.nim`, `state_plugin.nim`) and
+> has no `std/macros` dependency.
+>
 # Nimony compiler issues
 
 > yith now lives in its own repository at `/home/daniil/projects/yith`.

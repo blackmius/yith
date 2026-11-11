@@ -1,7 +1,5 @@
 ## JS/passive `Resource`: loading -> ready, source change restarts, and a
-## late response from the previous generation is dropped. The DSL macro is
-## intentionally not imported: Nimony's JS build currently cannot import
-## `std/macros` (FAIL under `docs/nimony-issues.md` #25).
+## late response from the previous generation is dropped.
 {.feature: "assumeSync".}
 
 import std/syncio
@@ -18,7 +16,7 @@ var user: Resource[string]
 proc start() {.exportc: "start".} =
   root = createElement("div")
   let sc = beginRoot(root)
-  who = state("a")
+  who = newState("a")
   user = resource(proc (): string {.passive.} =
     awaitText("/user/" & who.get()))
   uiBlock(proc () {.closure.} =

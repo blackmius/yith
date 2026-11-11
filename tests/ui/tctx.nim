@@ -19,7 +19,7 @@ template Axis(label: string) =
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let n = state(0)
+let n = newState(0)
 
 Chart():
   Axis("x")

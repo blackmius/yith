@@ -1,4 +1,3 @@
-{.rewriteModule("../../src/yith/uiblock_plugin").}
 
 import std/syncio
 import yith/ui
@@ -6,21 +5,21 @@ import yith/dom/api
 
 proc View(name: State[string]): E {.ui.} =
   c.Div.root:
-    if name == "Ann":
+    if name.get() == "Ann":
       c.Span.a:
         "hello Ann"
-    elif name == "Bob":
+    elif name.get() == "Bob":
       c.Span.b:
         "hello Bob"
     else:
       "stranger"
-    if name != "Ann":
+    if name.get() != "Ann":
       c.Em.x:
         "not ann"
 
 let root = createElement("div")
 let sc = beginRoot(root)
-let name = state("Ann")
+let name = newState("Ann")
 discard View(name)
 echo toHtml(root)
 name.set("Bob")

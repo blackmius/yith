@@ -7,8 +7,8 @@ intended model of signals, DSL, slots and the drag-and-drop example is in
 
 ## Requirements
 
-- Nimony with the `{.rewriteModule("path").}` pre-sem hook (the companion
-  Nimony change). The legacy `{.ui.}` macro path works without it.
+- Nimony with plugin support: a template plugin (the `{.ui.}` syntax pass) and
+  a post-sem module/type plugin (the state pass).
 - `jorogumo` from `nativenif` on `PATH` for `nimony j` (JS tests and examples).
 - The C tests need only the Nimony toolchain; they use the built-in test DOM.
 
@@ -19,8 +19,10 @@ intended model of signals, DSL, slots and the drag-and-drop example is in
 | `core.nim` | `State[T]`, `Scope`, subscriptions, batching, dispose |
 | `dom/test.nim` | DOM tree in pure Nim: `toHtml`, `fire`, lookup |
 | `dom/js.nim` | browser `importjs` bindings |
-| `dsl.nim` | low-level `Text`, `ElE`, `uiBlock`, `uiWhen`, events |
-| `uipragma.nim` | macro pragma `{.ui.}` for `proc ...: E`: `c.Tag.class:` |
+| `dsl.nim` | low-level `Text`, `uiBlock`, `uiWhen`, `uiLoop`, events |
+| `uiblock.nim` | the `{.ui.}` / `ui:` plugin template entry point |
+| `uiblock_plugin.nim` | pass 1: `c.Tag.class:` → `uiBlock`/`uiWhen`/`uiLoop` |
+| `state_plugin.nim` | pass 2: `{.state.}` → `State[T]` + `get`/`set` |
 | `component.nim` | `E`, `fragment`, `mount`, `replace` |
 | `context.nim` | `context[T]`, `provide`, `use` |
 | `async.nim` | passive effects without blocking the thread |
@@ -34,13 +36,16 @@ Public facade: `import yith/ui`.
 ## Model
 
 ```nim
-let count = state(0)
+var count {.state.}: int = 0
 
 uiBlock(proc () {.closure.} =
-  Text("count=" & $count.get()))
+  Text("count=" & $count))
 ```
 
-- `state(v)` creates a signal.
+- `{.state.}` marks a declaration (or parameter) as reactive. Pass 1 leaves it
+  as a plain value, so ordinary Nim code type-checks; pass 2 rewrites the
+  declaration to `State[T]` and reads/writes to `get`/`set`.
+- `newState(v)` is the explicit constructor for a `State[T]` handle.
 - `.get()` during scope execution subscribes that scope.
 - `.set(v)` marks subscribers dirty and schedules a microtask flush.
 - `uiBlock`, `uiWhen`, `uiLoop`, `fragment`, `effect` create a scope.
@@ -49,20 +54,22 @@ uiBlock(proc () {.closure.} =
 
 `get()` outside scope execution (an event handler, imperative code) **does not
 subscribe** to anything: for an explicit read without subscription use
-`stateValue`.
+`stateValue`. State handles are passed explicitly; a `{.state.}` parameter is
+the plain-value API and accepts `.state.` values (or literals, which pass 2
+wraps with `newState`).
 
 ## Components
 
-A component is an ordinary `proc ...: E` with the `{.ui.}` pragma. The macro
+A component is an ordinary `proc ...: E` with the `{.ui.}` pragma. Importing
+`yith/ui` brings the pragma, both plugin passes and the runtime. The syntax pass
 wraps the body in a build-once fragment itself; `return`/`result` are not
 needed.
 
 ```nim
 import yith/ui
-import yith/uipragma
 
 proc Counter(): E {.ui.} =
-  let count = state(0)
+  var count {.state.}: int = 0
   c.Div.counter:
     c.Span.n:
       count
@@ -86,7 +93,7 @@ proc View(count: State[int]): E {.ui.} =
       prop.title("hello").tabIndex(3)
       onClick(e):
         count += 1
-      onMount(e: El):
+      onMount(e):
         echo "mounted"
       onCleanup():
         echo "cleanup"
@@ -114,12 +121,12 @@ proc View(count: State[int]): E {.ui.} =
 Additionally supported: slots `Card(): body` and `slot title: body`
 (the component receives `children`/`title: proc () {.closure.}`),
 auto-fragment (multi-root), `Computed`, `s += v`/`s.foo()` and `s = v` for
-local/parameter signals, arbitrary methods in `Text`/children
+`.state.` values, arbitrary methods in `Text`/children
 (`s.total`, `s.hasTwo()`) and `s.len`, automatic `computedExpr` for local
-`let z = <expr with signals>`, reactive `if`/`for`, keyed `for` with
+`let z = <expr with state>`, reactive `if`/`for`, keyed `for` with
 `key expr`, auto-`.closure.` on event lambdas, `Resource[T]`/
 `ArgResource[T, A]` with `case user:`. The keyed path also works for local
-`let items = state(@[...])`.
+`var items {.state.}: seq[T] = @[...]`.
 
 Tests: `tests/ui/tuipragma.nim`, `tsugar.nim`, `tcomputed.nim`,
 `tresource.nim`, `taresource.nim`, `targresource.nim`,
@@ -240,128 +247,127 @@ discard m.tick(1.0 / 60.0)
 There are no variants, AnimatePresence/exit, layout projection, keyframes or
 `whileInView` yet; those are the next layers on top of `spec` + `motion`.
 
-## Plugin-native UI (migration from std/macros)
+## Two-pass UI compilation
 
-### Exact `{.ui.}` via `{.rewriteModule.}`
+`yith` does not use `std/macros`. Importing `yith/ui` brings in the `{.ui.}`
+template plugin and the runtime. A component is written as usual; two plugin
+passes turn it into ordinary typed Nimony.
 
-Nimony provides a single pre-sem hook: a module plugin that sees the raw module
-before phase1. It is enabled with one annotation:
+### Pass 1 — syntax (`uiblock_plugin.nim`)
 
-```nim
-{.rewriteModule("../../src/yith/uiblock_plugin").}
-
-var theme {.state.}: string = "light"
-
-proc View(count {.state.}: int): E {.ui.} =
-  c.Div.root:
-    attr.id("root")
-    c.Span.title:
-      "hello"
-    c.Button.btn:
-      onClick(e):
-        count = count + 1
-      "click"
-```
-
-The plugin:
-
-- rewrites `c.Tag.class:` into runtime calls;
-- strips `{.ui.}` from the procedure;
-- turns `name {.state.}: T` into `State[T]` and rewrites reads/writes
-  (`count` → `count.get()`, `count = v` → `count.set(v)`);
-- expands reactive `if`/`for`, keyed lists and derived locals.
-
-There are no phases (`preSem`/`beforeBodies`/`postSem`) and no type queries in
-the compiler. The old module-level `{.plugin: "path".}` still works on an
-already sem-checked module.
-
-### State between modules
-
-`{.state.}` is sugar for the declaration only. Module A:
+`proc View(): E {.ui.} = ...` invokes the template plugin with the untyped
+routine definition. It rewrites only syntax that is not valid Nim:
 
 ```nim
-{.rewriteModule("../../src/yith/uiblock_plugin").}
-
-var theme* {.state.}: string = "light"   # becomes State[string]
+c.Div.card:
+  attr.id("root")
+  "hello"
 ```
 
-Module B sees a plain `State[string]` and can:
+becomes
 
-1. pass it to a `{.state.}` parameter — the parameter itself becomes `State[T]`:
+```nim
+uiBlock("div",
+  proc (e: E) {.closure.} =
+    addClass(e, "card")
+    attr(e, "id", "root"),
+  proc () {.closure.} =
+    Text("hello"))
+```
 
-   ```nim
-   proc View(theme {.state.}: string): E {.ui.} = ...
-   discard View(mytheme)          # mytheme: State[string]
-   ```
+It also lowers `if`/`elif`/`else` to `uiWhen`, `for` to `uiLoop` (with a
+`uiKey` marker for keyed loops), `case user:` over a resource to
+`uiCaseBlock`, component calls with `children`/`slot` arguments, and all
+attributes, styles, properties and event handlers.
 
-2. create an alias with `{.signal.}` (it does not wrap again, it only marks
-   the value for get/set in this module):
+`{.state.}` is deliberately left untouched. The result is valid Nimony in
+which a state variable is still a plain value, so the normal semantic pass can
+type-check the component.
 
-   ```nim
-   let theme {.signal.} = a.theme
-   ```
+The syntax pass also emits a unique `var yithHook…: PluginHook` per routine.
+`PluginHook` is a nominal type in `yith/internal.nim` carrying
+`{.plugin: "state_plugin".}`; Nimony deduplicates type plugins per module, so
+the second pass runs exactly once per module regardless of how many components
+it contains.
 
-3. write `.get()`/`.set()` explicitly.
+### Pass 2 — state (`state_plugin.nim`)
 
-A bare `a.theme` without an alias is not rewritten: the pre-sem plugin only
-sees the source of its own module, without imports and types. This is a
-deliberate limitation, not an unfinished feature.
+The module/type plugin receives the semchecked module and rewrites
+`{.state.}` declarations and every use that resolved to them:
 
-Checks:
+```nim
+var name {.state.}: string = state("light")
+name = name & "!"
+```
 
-- `tests/ui/tuiphase.nim` — C/test DOM;
-- `tests/ui/tuiphase_sugar.nim`, `tuiphase_if.nim`, `tuiphase_for.nim`,
-  `tuiphase_keyed.nim`, `tuiphase_state.nim`;
-- `tests/ui/tuiphase_cross_b.nim` — state from another module;
-- `tests/ui/js_uiphase.nim` — **JS without std/macros**.
+becomes
 
-### Block form (`ui:` template plugin)
+```nim
+var name: State[string] = newState("light")
+name.set(name.get() & "!")
+```
 
+The plugin emits source-level NIF (`State`, `get`, `set`, `newState`) and lets
+Nimony re-run sem, so the result is fully typed. It handles:
 
-`std/macros` is legacy. Verified: a Nimony plugin can be a template plugin with
-an untyped block that receives NIF **before sem** and can transform the `c`
-syntax. It builds under JS too, without `std/macros`.
+- declarations and parameters: `T` → `State[T]`, initializer → `newState(v)`;
+- reads, assignments and compound assignments (`+=`, `-=`, `*=`, `/=`, `&=`);
+- mutating method calls (`items.add(5)`) through a temporary;
+- derived locals in UI routines (`let z = <expr with state>`) via
+  `computedExpr`;
+- keyed `for` loops via `forEachList`;
+- `Text`/attribute values: a bare State is passed to the State overload, an
+  expression is wrapped in `computedExpr`, so it stays reactive;
+- explicit `State[T]` parameters and imported handles are recognized by their
+  type and only their uses are rewritten.
+
+`state(v)` is an identity proc; it exists so `var x {.state.}: T = state(v)`
+type-checks before pass 2. Nimony identifiers cannot start with `_`, so the
+real constructor is `newState(v)` (not `_state`).
+
+### Cross-module state
+
+A module that only declares state (no components) must enable the state pass
+explicitly; importing `yith/core` is not enough:
+
+```nim
+import yith/core
+import yith/internal
+
+stateModule()                       # run the post-sem state pass once
+
+var theme* {.state.}: string = "light"
+```
+
+A module that imports it sees a normal `State[string]`. Use an explicit
+`State[string]` parameter (and `.get()`/`.set()`) across module boundaries; a
+`{.state.}` parameter is the plain-value API for values declared in the same
+module. There is no `{.signal.}` alias. The state pass only knows the state
+parameters of the module it is compiling; when calling an imported helper that
+takes an explicit `State[T]`, pass the handle through (or unwrap with `.get()`
+if the helper takes the value).
+
+### Block form
+
+The same template can be used as a block when a routine pragma is not
+convenient:
 
 ```nim
 import yith/ui
-import yith/uiblock
 
 ui:
   proc View(): E =
-    c.Div.cls1:
-      attr.id("root")
-      c.Span.title:
-        "hello"
-      c.Button.btn:
-        onClick(e):
-          echo "clicked"
-        "click"
+    c.Div.card:
+      "hello"
 ```
 
-`uiblock_plugin.nim` already handles:
+### Checks
 
-- `c.Tag.class:`;
-- `attr.name(value)`, `css.name(value)`, `prop.name(value)` (one name per call);
-- `onClick(e):`, `onCleanup():`;
-- nested `c` and text;
-- attributes/classes are applied after `let node = ElE(...)`, events through
-  generated `proc (...) {.closure.}`.
-
-Checks:
-
-- `tests/ui/tuiplugin.nim` — C/test DOM:
-  `<div class="cls1" id="root"><span class="title">hello</span><button class="btn">click</button></div>`;
-- `tests/ui/js_uiblock.nim` — **JS** (`nimony j`), without `std/macros`:
-  the same DOM in a Node harness.
-
-The `rewriteModule` path already has signal sugar (`s = v`, `s += v`,
-auto-`.get()`), `if`/`for` lowering, derived locals and keyed lists. `slots`
-and `Resource`/`case` are not ported yet; for those the old `{.ui.}` macro is
-still used.
-
-Important: a plugin-template cannot be attached as a proc pragma `{.ui.}`
-(y28). Exact `{.ui.}` works through `{.rewriteModule(...).}` (a single pre-sem
-module hook), and the `ui:` block works through the template plugin.
+- `tests/ui/tuiphase*.nim` — syntax, state, `if`/`for`, keyed loops, sugar,
+  methods, cross-module handles;
+- `tests/ui/tuipragma.nim` — slots, attributes, events, `Computed`,
+  `Resource`;
+- `tests/ui/js_uiphase.nim`, `js_uiblock.nim` — the same paths on JS.
 
 ## Context (useContext)
 
@@ -410,9 +416,9 @@ another call (`register(delay(), sc)` compiles incorrectly).
 ## Asynchronous Resource
 
 ```nim
-let userId = signal(0)
+var userId {.state.}: int = 0
 let user = resource(proc (): User {.passive.} =
-  fetchJson("/api/users/" & $userId.get()))
+  fetchJson("/api/users/" & $userId))
 
 case user:
 of Loading: Spinner()
@@ -436,7 +442,7 @@ value after a passive effect re-runs (`docs/nimony-issues.md` #24).
 Resource with an argument:
 
 ```nim
-let userId = signal(0)
+var userId {.state.}: int = 0
 let user = resource(proc (id: int): User {.passive.} =
   fetchJson("/api/users/" & $id), userId.get())
 
@@ -478,10 +484,8 @@ tests/ui/run_js.sh
 `js_aresource` checks `Loading → Ready`, re-running on source change and
 discarding a late response from a previous generation.
 
-`tuiphase`/`js_uiphase` cover the exact `{.ui.}` path through
-`rewriteModule` on C and JS. The legacy macro (`uipragma.nim`) remains C-only:
-importing `std/macros` in a JS build fails on `errorcodes_posix`
-(`docs/nimony-issues.md` #25); `tests/ui/run.sh` covers it.
+`tuiphase`/`js_uiphase` cover the two-pass `{.ui.}` path on C and JS.
+There is no macro path and no `std/macros` dependency.
 
 ## Limitations of this version of Nimony
 
