@@ -1285,6 +1285,23 @@ With the cycles broken, the browser kanban holds up over hundreds of preview
 re-renders; `for column in board.get().columns:` and the `State[Column]`
 component API are both fine.
 
+Four more leaks showed up under long interactions and are also fixed in yith:
+
+- a dead `Sub` kept `prev`/`next` pointers to its neighbours, so destroying the
+  `Sub` decremented neighbours the signal list no longer owned (cleared on
+  `unlink`);
+- event handlers ran with `tracking` enabled, allocating a `Sub` for every
+  `.get()` (handlers now run inside `withoutTracking`);
+- speculative renders registered real event listeners for a tree that was
+  immediately disposed (events are suppressed while speculating, and handler
+  slots are reused/cleared on removal);
+- the JS backend could leave shadow-stack frames behind, eventually colliding
+  with the allocator (the event bridge remembers a stack base and resets
+  `SP`/`_SPF` after the outermost callback).
+
+`State.set` also logs each visited `Sub` in the debug build (`set visit`) so a
+dangling link is visible right before the crash.
+
 ---
 
 # Findings that are **not** compiler bugs (for triage)

@@ -227,10 +227,13 @@ For signal/scope lifecycle debugging use the debug bundle:
 YITH_DEBUG=1 examples/ui/build_kanban_js.sh
 ```
 
-It starts with a `yith kanban ...` console marker and keeps the last 800
-`[yith] link/unlink/set` events. After reproducing a problem:
+It starts with a `yith kanban cyclefix-4` console marker and keeps the last
+5000 `[yith] link/unlink/set/set visit` events. Before reproducing a problem,
+clear the buffer so the crash window is not overwritten:
 
 ```js
+NIF.clearLog()      // start a fresh capture
+// ... click/drag until it fails ...
 NIF.dumpLog()       // print the ring buffer
 NIF.debugSignals()  // live subscriber counts per state
 ```

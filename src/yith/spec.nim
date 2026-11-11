@@ -30,9 +30,14 @@ proc speculateOne*[S](state: S;
   ## is attached with `visibility:hidden`, so CSS layout (flex, absolute
   ## positioning, transforms) is real and `bounds` can measure it.
   let root = createHiddenHost()
+  # A speculative view is only measured; registering its event handlers would
+  # create live closures for a tree that is immediately disposed.
+  let prevSuppressed = eventsSuppressed
+  eventsSuppressed = true
   let sc = beginRoot(root)
   discard render(state)
   endRoot()
+  eventsSuppressed = prevSuppressed
   result = SpecView[S](state: state, root: root, scope: sc)
 
 proc speculate*[S](states: seq[S];

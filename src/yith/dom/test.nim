@@ -151,16 +151,20 @@ proc textContent*(n: Node): string =
       result.add textContent(n.children[i])
 
 proc addEventListener*(n: Node; event: string;
-                       cb: proc (e: Event) {.closure.}) =
+                       cb: proc (e: Event) {.closure.}): int =
+  result = n.handlers.len
   n.handlers.add Handler(event: event, cb: cb)
 
-proc removeEventListener*(n: Node; event: string) =
+proc removeEventListener*(n: Node; event: string; id: int) =
   var i = 0
   while i < n.handlers.len:
     if n.handlers[i].event == event:
       n.handlers.delete i
     else:
       inc i
+
+proc removeEventListener*(n: Node; event: string) =
+  removeEventListener(n, event, -1)
 
 proc fireAt*(n: Node; event: string; x, y: float): int =
   ## Dispatch a pointer-like event with coordinates on `n`.

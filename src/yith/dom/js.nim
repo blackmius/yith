@@ -58,17 +58,35 @@ proc dispatch(id: int; e: Event) {.nimcall.} =
     handlers[id].cb(e)
 
 proc addEventListener*(n: Node; event: string;
-                       cb: proc (e: Event) {.closure.}) =
+                       cb: proc (e: Event) {.closure.}): int =
   if not ensured:
     ensured = true
     jsEnsure()
-  let id = handlers.len
-  handlers.add Handler(cb: cb)
+  var id = -1
+  var i = 0
+  while i < handlers.len:
+    if handlers[i] == nil:
+      id = i
+      break
+    inc i
+  if id < 0:
+    id = handlers.len
+    handlers.add Handler(cb: cb)
+  else:
+    handlers[id] = Handler(cb: cb)
   jsOn(n, event, dispatch, id)
+  result = id
 
-proc removeEventListener*(n: Node; event: string) =
+proc removeEventListener*(n: Node; event: string; id: int) =
+  if id >= 0 and id < handlers.len:
+    # Drop the closure (and everything it captured) immediately. The array
+    # slot is reused by the next registration.
+    handlers[id] = nil
   if ensured:
     jsOff(n, event)
+
+proc removeEventListener*(n: Node; event: string) =
+  removeEventListener(n, event, -1)
 
 proc nextSibling*(n: Node): Node {.importjs: "#.nextSibling".}
 proc parentNode*(n: Node): Node {.importjs: "#.parentNode".}

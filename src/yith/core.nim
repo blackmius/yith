@@ -393,6 +393,9 @@ proc set*[T](s: State[T]; v: T) =
   s.value = v
   var it = s.sig.head
   while it != nil:
+    when defined(yithDebugSignals):
+      if sigFocused(s.sig.id):
+        dlog("set visit sig " & $s.sig.id & " sub " & $it.id)
     let nxt = it.next
     if not it.dead and not it.scope.dead and not it.scope.scheduled:
       it.scope.scheduled = true

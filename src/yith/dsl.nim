@@ -524,15 +524,21 @@ template When*(cond: untyped; thenBody: untyped; elseBody: untyped): E =
 
 # --------------------------------------------------------------------- events
 
+var eventsSuppressed* = false
+  ## Set by speculative rendering: throwaway views do not need listeners, and
+  ## registering them leaks handler closures/scopes into the live app.
+
 proc on*(e: E; event: string; cb: proc (ev: Event) {.closure.}) =
   ## Event handlers never subscribe to the states they read: reading a state
   ## in a handler must not allocate a `Sub`. `withoutTracking` also leaves
   ## `tracking` false if the handler raises.
-  addEventListener(e.startNode, event, proc (ev: Event) {.closure.} =
+  if eventsSuppressed:
+    return
+  let id = addEventListener(e.startNode, event, proc (ev: Event) {.closure.} =
     withoutTrackingStmt:
       cb(ev))
   onCleanup(proc () {.closure.} =
-    removeEventListener(e.startNode, event))
+    removeEventListener(e.startNode, event, id))
 
 template OnClick*(e: E; body: untyped) =
   on(e, "click", proc (ev: Event) {.closure.} = body)

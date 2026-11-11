@@ -4,7 +4,8 @@
 ## positions are measured by rendering candidates into the hidden DOM host
 ## (`speculativeTargets`); nothing here computes card/column coordinates.
 ## Pointer moves preview the chosen state through normal CSS layout; the ghost
-## uses `withFloating`.
+## uses `withFloating`. The board is re-rendered only when the drop target
+## changes, not on every pixel of pointer movement.
 ##
 ## Event handlers inside loops capture the loop variable by reference in
 ## Nimony (issue #2), so each card is a separate `CardView` component.
@@ -21,7 +22,7 @@ import yith/spec
 import yith/dom/api
 import ./kanban_model
 
-const kanbanBuild* = "cyclefix-2"
+const kanbanBuild* = "cyclefix-4"
 
 var
   board: State[Board]
