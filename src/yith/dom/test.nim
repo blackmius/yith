@@ -194,24 +194,6 @@ proc isVoid(tag: string): bool =
   else:
     result = false
 
-proc toHtmlFull*(n: Node): string =
-  result = ""
-  case n.kind
-  of nkText:
-    result = escapeHtml(n.text, true)
-  of nkComment:
-    result = "<!--" & n.text & "-->"
-  of nkElement:
-    result = "<" & n.tag
-    for i in 0 ..< n.attrs.len:
-      result.add " " & n.attrs[i][0] & "=\"" & escapeHtml(n.attrs[i][1], false) & "\""
-    result.add ">"
-    if isVoid(n.tag):
-      return
-    for i in 0 ..< n.children.len:
-      result.add toHtmlFull(n.children[i])
-    result.add "</" & n.tag & ">"
-
 proc toHtml*(n: Node): string =
   ## Serialize without implementation anchors (comment nodes).
   result = ""
@@ -295,9 +277,6 @@ proc findAll*(n: Node; sel: string; acc: var seq[Node]) =
 proc queryAll*(n: Node; sel: string): seq[Node] =
   result = @[]
   findAll(n, sel, result)
-
-proc textOf*(n: Node): string =
-  result = textContent(n)
 
 proc nextSibling*(n: Node): Node =
   if n.parent == nil: return nil

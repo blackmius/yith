@@ -15,8 +15,16 @@ require(process.argv[2]);
 const NIF=globalThis.NIF;
 const out=[]; const orig=console.log; console.log=(...a)=>out.push(a.join(" "));
 NIF.start();
-NIF.dump(); orig("T0", out.pop());
+NIF.dump();
+const json = out.pop();
+orig("T0", json);
 function find(n, cls){ if(n.attrs && (n.attrs.class===cls || n.attrs.id===cls)) return n; for(const c of n.children){const r=find(c,cls); if(r)return r;} return null; }
-const btn=find(globalThis.__created[0], 'btn');
-if(btn && btn._listeners.click && btn._listeners.click[0]) btn._listeners.click[0]({target:btn,preventDefault(){}});
+const root = globalThis.__created[0];
+for (const cls of ["block-btn", "pragma-btn"]) {
+  const b = find(root, cls);
+  if (!b || !b._listeners.click || !b._listeners.click[0]) throw new Error("missing " + cls);
+  b._listeners.click[0]({target:b, preventDefault(){}});
+}
+if (!json.includes('"id":"block-root"') || !json.includes('"id":"pragma-root"'))
+  throw new Error("plugin forms did not render");
 process.exit(0);

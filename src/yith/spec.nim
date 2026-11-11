@@ -49,7 +49,7 @@ proc dispose*[S](v: SpecView[S]) =
   if v.root != nil:
     remove(v.root)
 
-proc find*[S](v: SpecView[S]; selector: string): Node =
+proc findNode*[S](v: SpecView[S]; selector: string): Node =
   result = find(v.root, selector)
 
 proc rect*[S](v: SpecView[S]; selector: string): Rect =
@@ -60,14 +60,6 @@ proc rect*[S](v: SpecView[S]; selector: string): Rect =
     result = Rect()
   else:
     result = bounds(n)
-
-proc measure*[S](v: SpecView[S]; selector: string;
-                 f: proc (n: Node; s: S): Point {.closure.}): Point =
-  let n = find(v.root, selector)
-  if n == nil:
-    result = Point(x: 0.0, y: 0.0)
-  else:
-    result = f(n, v.state)
 
 proc centerOf(r: Rect): Point =
   result = Point(x: r.x + r.w / 2.0, y: r.y + r.h / 2.0)

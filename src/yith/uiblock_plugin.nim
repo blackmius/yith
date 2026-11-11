@@ -176,7 +176,7 @@ proc isStatementCallHead(h: string): bool =
     h == "boolAttr" or h == "setBoolAttr" or h == "addStyle" or
     h == "setProp" or h == "addClass" or h == "on" or h == "uiBlock" or
     h == "uiFragment" or h == "fragment" or h == "uiWhen" or
-    h == "uiLoop" or h == "uiIf" or h == "uiCaseBlock" or h == "ElE"
+    h == "uiLoop" or h == "uiCaseBlock" or h == "ElE"
 
 proc isValueCallHead(h: string): bool =
   result = h == "get" or h == "peek" or h == "stateValue" or h == "len" or

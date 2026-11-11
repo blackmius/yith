@@ -150,7 +150,7 @@ proc hasStatePragma(p: NifCursor): bool =
           result = true
         skip c
 
-proc copyPragmasWithoutState(p: NifCursor; b: var NifBuilder; forceEmpty = false) =
+proc copyPragmasWithoutState(p: NifCursor; b: var NifBuilder) =
   ## Copy `(pragmas …)` minus `state`, or emit `.` when nothing remains.
   if p.kind == TagLit and p.tagText == "pragmas":
     var tmp = createTree()
@@ -168,8 +168,6 @@ proc copyPragmasWithoutState(p: NifCursor; b: var NifBuilder; forceEmpty = false
     if wrote:
       var r = snapshot(tmp)
       b.takeTree r
-    elif not forceEmpty:
-      b.addEmptyNode()
     else:
       b.addEmptyNode()
   else:
@@ -837,7 +835,24 @@ proc emitInfix(n: var NifCursor; b: var NifBuilder) =
   var lhs = op
   skip lhs
   if (op.kind == Ident or op.kind == Symbol) and
-     (lhs.kind == Symbol or lhs.kind == Ident) and hasState(nameOf(lhs)):
+     (lhs.kind == Symbol or lhs.kind == Ident) and hasState(nameOf(lhs)) and
+     stateKind(nameOf(lhs)) != skDecl:
+    # Explicit `State[T]` handles already define `+=`, `&=`, ... . Keep the
+    # operator and the receiver, but still rewrite state reads on the RHS.
+    var rhs = lhs
+    skip rhs
+    b.openTree(TagId(InfixX), n.info)
+    var o = op
+    b.takeTree o
+    var l = lhs
+    b.takeTree l
+    tr(rhs, b)
+    b.closeTree()
+    skip n
+    return
+  if (op.kind == Ident or op.kind == Symbol) and
+     (lhs.kind == Symbol or lhs.kind == Ident) and
+     stateKind(nameOf(lhs)) == skDecl:
     let o = symBasenameOrName(op)
     var mapped = o
     var compound = true
@@ -872,7 +887,8 @@ proc emitInfix(n: var NifCursor; b: var NifBuilder) =
 
 proc emitAsgn(n: var NifCursor; b: var NifBuilder) =
   var lhs = firstChild(n)
-  if (lhs.kind == Symbol or lhs.kind == Ident) and hasState(nameOf(lhs)):
+  if (lhs.kind == Symbol or lhs.kind == Ident) and
+     stateKind(nameOf(lhs)) == skDecl:
     var rhs = lhs
     skip rhs
     emitSet(lhs, rhs, b)

@@ -1301,10 +1301,15 @@ type
   `DragBehavior`; `between` currently picks the nearest target, visual
   interpolation is the next layer. `vary`, `withSnapRadius`, `dropTarget`,
   `switchToStateAndFollow` are not done yet.
+- During a drag the app can assign `previewState(start)` to the model state;
+  CSS reflows the live elements into the candidate arrangement and a
+  fixed-position ghost follows the pointer. Drop keeps the chosen state;
+  cancel restores the start state. No positions are interpolated in
+  application code.
 - Example `examples/ui/kanban.nim`: a card builds target states
-  "task inserted into each column/position", drop applies the chosen
-  state, ghost and `cls.drop(...)` give a preview; columns are
-  reordered via `between(...)`.
+  "task inserted into each column/position", measurements come from hidden
+  renders, drop applies the chosen state, ghost and `cls.drop(...)` give a
+  preview; columns are reordered the same way.
 - Example `examples/ui/rows.nim` repeats the rows/tiles from Dragology:
   `closest(...).whenFar(stateWithout).withFloating()`.
 - Handlers in a loop must be moved into a per-element component
@@ -1322,7 +1327,8 @@ SpecView[S] = object
 
 speculateOne(state, render) -> SpecView
 speculate(states, render) -> seq[SpecView]
-measure(view, selector, f) -> Point
+rect(view, selector) -> Rect
+speculativeTargets(states, render, selector) -> seq[DragTarget[S]]
 dispose(view)
 ```
 

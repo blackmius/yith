@@ -1166,7 +1166,7 @@ at n_flush_...
 ```
 
 ### Repro
-Build `examples/ui/kanban_js.nim` into JS:
+Build `examples/ui/kanban.nim` into JS:
 
 ```sh
 examples/ui/build_kanban_js.sh

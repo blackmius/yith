@@ -22,5 +22,4 @@ run() {
 run js_smoke js_harness.js
 run js_async js_async_harness.js
 run js_aresource js_aresource_harness.js
-run js_uiblock js_uiblock_harness.js
-run js_uiphase js_uiblock_harness.js
+run js_plugin js_plugin_harness.js

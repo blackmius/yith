@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 NIMONY="${NIMONY:-$ROOT/../nimony/bin/nimony}"
 mkdir -p "$ROOT/bin"
-for t in tcore tdsl tui tctx tdeep toption tuipragma tcomputed tsugar tresource taresource targresource tcomplex tcontrol tforeach tkeyed tcombinator tdrag tmotion tspec tuiplugin tuiphase tuiphase_sugar tuiphase_for tuiphase_if tuiphase_method tuiphase_keyed tuiphase_state tuiphase_cross_b; do
+for t in tcore tdsl tui tctx tdeep toption tfeatures tcomputed tsugar tresource taresource targresource tcomplex tcontrol tforeach tkeyed tcombinator tdrag tmotion tspec tuiplugin tuiphase tuiphase_sugar tuiphase_for tuiphase_if tuiphase_method tuiphase_keyed tuiphase_state tuiphase_cross_b; do
   "$NIMONY" c -f -d:yithDomTest -p:"$ROOT/src" \
     "$ROOT/tests/ui/$t.nim" -o:"$ROOT/bin/ui_$t"
   "$ROOT/bin/ui_$t"

@@ -22,10 +22,6 @@ type
     task*: Task
     found*: bool
 
-  KanbanDrag* = object
-    task*: Task
-    states*: seq[Board]
-
 proc copyTasks(tasks: seq[Task]): seq[Task] =
   result = @[]
   var i = 0
@@ -79,16 +75,16 @@ proc extractTask*(b: Board; id: int): Extracted =
       inc ti
     inc ci
 
-proc buildDrag*(b: Board; id: int): KanbanDrag =
+proc buildDrag*(b: Board; id: int): seq[Board] =
+  result = @[]
   let ex = extractTask(b, id)
-  result = KanbanDrag(task: ex.task, states: @[])
   if not ex.found:
     return
   var ci = 0
   while ci < ex.board.columns.len:
     var pos = 0
     while pos <= ex.board.columns[ci].tasks.len:
-      result.states.add withTaskAt(ex.board, ci, pos, ex.task)
+      result.add withTaskAt(ex.board, ci, pos, ex.task)
       inc pos
     inc ci
 

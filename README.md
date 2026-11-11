@@ -137,7 +137,7 @@ auto-fragment (multi-root), `Computed`, `s += v`/`s.foo()` and `s = v` for
 `ArgResource[T, A]` with `case user:`. The keyed path also works for local
 `var items {.state.}: seq[T] = @[...]`.
 
-Tests: `tests/ui/tuipragma.nim`, `tsugar.nim`, `tcomputed.nim`,
+Tests: `tests/ui/tfeatures.nim`, `tsugar.nim`, `tcomputed.nim`,
 `tresource.nim`, `taresource.nim`, `targresource.nim`,
 `tcontrol.nim`, `tkeyed.nim`, `tcombinator.nim`, `tmotion.nim`,
 `tspec.nim`.
@@ -163,7 +163,21 @@ let dragCtl = newDragController[Board]()
 - `.withFloating()` — mark the preview as floating;
 - `start(drag, behavior, p)` / `start(drag, targets, p)`;
 - `move(drag, p)`, `finish(drag)`, `cancel(drag)`;
-- `hasDrop(drag)`, `chosen(drag)`.
+- `hasDrop(drag)`, `chosen(drag)`;
+- `previewState(start)` — the state to render live during the drag.
+
+### Layout is CSS, not arithmetic
+
+Drag plans never compute `x`/`y` for items. The model stores only logical
+state (identity, order, parent); the view declares layout with CSS
+(`display:flex`, `gap`, `padding`, widths, grids). The browser computes every
+box. To know where a drop would put the dragged element, yith renders the
+candidate state into the hidden host and measures the real box.
+
+While dragging, the application can assign `dragCtl.previewState(start)` to its
+model state. CSS reflows the actual elements to the preview arrangement, and a
+floating ghost is just a `position:fixed` element following the pointer. On
+drop, the chosen state stays; on cancel, the start state is restored.
 
 Example `examples/ui/kanban.nim`:
 
@@ -198,8 +212,8 @@ not implemented yet. That is the next layer. `dropTarget`, `switchToStateAndFoll
 
 ### Browser
 
-`examples/ui/kanban_js.nim` + `kanban.html` — an experimental browser wrapper
-on runtime primitives (because `{.ui.}` does not build for JS, issue #25):
+`examples/ui/kanban.nim` + `kanban.html` — the same plugin-based example is
+also built for JS:
 
 ```sh
 examples/ui/build_kanban_js.sh
@@ -207,9 +221,9 @@ python3 -m http.server 8000
 # http://localhost:8000/examples/ui/kanban.html
 ```
 
-For now it renders the initial board, but drop fails in the JS backend during
-scope teardown (`DataView`/dealloc, issue #27). The working path for the drag
-examples is the C/test DOM (`tests/ui/run.sh`).
+Known JS issue: drop can fail during scope teardown (`DataView`/dealloc,
+`docs/nimony-issues.md` #27). The C/test DOM path (`tests/ui/run.sh`) is the
+fully working one.
 
 ## Speculative rendering
 
@@ -229,15 +243,19 @@ let views = speculate(@[state1, state2],
 
 for v in views:
   echo toHtml(v.root)
-  discard measure(v, "#item-1", proc (n: Node; s: MyState): Point =
-    Point(x: 0.0, y: s.y))
+  let r = rect(v, "#item-1")
+  echo r.x, ",", r.y, " ", r.w, "x", r.h
   dispose(v)
 ```
 
-This is the basis for model-driven dragging: target states can be rendered
-offscreen and measured instead of hand-written layout functions. For now
-measurement is an external callback (`rect()` in the browser, attributes/model
-in tests).
+To build drag targets directly:
+
+```nim
+let targets = speculativeTargets(states, render, "#item-1")
+```
+
+The component's normal CSS decides where each item lands; the drag code only
+reads the measured boxes.
 
 ## Motion core
 
@@ -380,9 +398,9 @@ ui:
 
 - `tests/ui/tuiphase*.nim` — syntax, state, `if`/`for`, keyed loops, sugar,
   methods, cross-module handles;
-- `tests/ui/tuipragma.nim` — slots, attributes, events, `Computed`,
+- `tests/ui/tfeatures.nim` — slots, attributes, events, `Computed`,
   `Resource`;
-- `tests/ui/js_uiphase.nim`, `js_uiblock.nim` — the same paths on JS.
+- `tests/ui/js_plugin.nim` — both `ui:` and `{.ui.}` forms on JS.
 
 ## Context (useContext)
 
@@ -493,13 +511,12 @@ The browser one uses an `id → closure` table and a capture-free dispatcher.
 tests/ui/run_js.sh
 ```
 
-`run_js.sh` compiles `js_smoke`, `js_async` and `js_aresource` with
-`nimony j` and runs them with the matching Node harnesses
-(`js_harness.js`, `js_async_harness.js`, `js_aresource_harness.js`).
+`run_js.sh` compiles `js_smoke`, `js_async`, `js_aresource` and `js_plugin`
+with `nimony j` and runs them with the matching Node harnesses.
 `js_aresource` checks `Loading → Ready`, re-running on source change and
 discarding a late response from a previous generation.
 
-`tuiphase`/`js_uiphase` cover the two-pass `{.ui.}` path on C and JS.
+`tuiphase` and `js_plugin` cover the two-pass `{.ui.}` path on C and JS.
 There is no macro path and no `std/macros` dependency.
 
 ## Limitations of this version of Nimony

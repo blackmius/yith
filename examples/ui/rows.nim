@@ -9,6 +9,8 @@
 ##   nimony c -d:yithDomTest -p:src examples/ui/rows.nim -o:bin/rows
 ##   ./bin/rows
 
+{.feature: "assumeSync".}
+
 import std/syncio
 import yith/ui
 import yith/dom/api
@@ -29,6 +31,8 @@ type
   Plan* = object
     base*: Sheet
     states*: seq[Sheet]
+
+var dragStart: State[Sheet]
 
 const
   TileSize* = 50.0
@@ -157,6 +161,7 @@ proc TileView*(model: State[Sheet]; dragCtl: DragController[Sheet];
     css.align_items("center")
     css.justify_content("center")
     onPointerDown(e):
+      dragStart.set(model.get())
       dragLabel.set(tile.label)
       dragColor.set(model.get().rows[rowIdx].color)
       startTileDrag(dragCtl, model, rowIdx, tileIdx,
@@ -182,6 +187,7 @@ proc RowView*(model: State[Sheet]; dragCtl: DragController[Sheet];
       css.align_items("center")
       css.justify_content("center")
       onPointerDown(e):
+        dragStart.set(model.get())
         dragLabel.set(model.get().rows[rowIdx].id)
         dragColor.set(model.get().rows[rowIdx].color)
         startRowDrag(dragCtl, model, rowIdx,
@@ -204,11 +210,14 @@ proc RowsView*(model: State[Sheet]; dragCtl: DragController[Sheet];
     onPointerMove(e):
       if dragCtl.active.get():
         discard dragCtl.move(Point(x: e.clientX, y: e.clientY))
+        model.set(dragCtl.previewState(dragStart.get()))
     onPointerUp(e):
       if dragCtl.active.get():
         discard dragCtl.finish()
         if dragCtl.hasDrop():
           model.set(dragCtl.chosen().state)
+        else:
+          model.set(dragStart.get())
         dragLabel.set("")
         dragColor.set("")
     uiBlock(proc () {.closure.} =
@@ -274,6 +283,7 @@ let model = newState(Sheet(rows: @[
     Tile(id: "A3", label: "A3"), Tile(id: "B3", label: "B3"),
     Tile(id: "C3", label: "C3")])]))
 let dragCtl = newDragController[Sheet]()
+dragStart = newState(model.get())
 let dragLabel = newState("")
 let dragColor = newState("")
 let view = RowsView(model, dragCtl, dragLabel, dragColor)

@@ -357,14 +357,6 @@ template uiCaseBlock*(body: untyped): E =
   ## resource's `value` state; a kind change rebuilds the branch.
   uiBlock(proc () {.closure.} = body)
 
-template uiIf*(cond: untyped; thenBody, elseBody: untyped): E =
-  uiWhen(proc (): bool {.closure.} = cond,
-         proc () {.closure.} = thenBody,
-         proc () {.closure.} = elseBody)
-
-template uiFor*(body: untyped): E =
-  uiLoop(proc () {.closure.} = body)
-
 type
   ForEachRow*[T] = ref object
     key*: string

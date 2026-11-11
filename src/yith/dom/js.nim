@@ -62,6 +62,7 @@ proc nextSibling*(n: Node): Node {.importjs: "#.nextSibling".}
 proc parentNode*(n: Node): Node {.importjs: "#.parentNode".}
 
 proc jsStringify*(n: Node): string {.importjs: "JSON.stringify(#)".}
+proc find*(n: Node; sel: string): Node {.importjs: "#.querySelector(#)".}
 
 proc rectLeft(n: Node): float {.importjs: "#.getBoundingClientRect().left".}
 proc rectTop(n: Node): float {.importjs: "#.getBoundingClientRect().top".}

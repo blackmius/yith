@@ -56,10 +56,6 @@ proc nearest*[S](targets: seq[DragTarget[S]]; p: Point;
       bestDist = d
     inc i
 
-proc closestIndex*[S](targets: seq[DragTarget[S]]; p: Point): int =
-  var d = 0.0
-  result = nearest(targets, p, d)
-
 proc closest*[S](targets: seq[DragTarget[S]]): DragBehavior[S] =
   result = DragBehavior[S](targets: targets, farRadius: 0.0)
 
@@ -143,6 +139,15 @@ proc cancel*[S](d: DragController[S]) =
 
 proc hasDrop*[S](d: DragController[S]): bool =
   result = d.target.get() >= 0 or d.far.get()
+
+proc previewState*[S](d: DragController[S]; base: S): S =
+  ## The state to render live while dragging. DOM-native preview: assign this
+  ## to the model state on each pointer move; the browser's CSS layout moves
+  ## the remaining items, so no positions are interpolated in application code.
+  if d.hasDrop():
+    result = d.chosen().state
+  else:
+    result = base
 
 proc chosen*[S](d: DragController[S]): DragTarget[S] =
   let i = d.target.get()

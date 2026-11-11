@@ -9,10 +9,10 @@ NIMONY="${NIMONY:-$ROOT/../nimony/bin/nimony}"
 export PATH="${JOROGUMO_DIR:-/tmp/nifjs}:$PATH"
 
 rm -rf "$ROOT/nimcache/j"
-"$NIMONY" j --browser -p:"$ROOT/src" "$ROOT/examples/ui/kanban_js.nim"
-f="$(find "$ROOT/nimcache/j" -name kanban_js.js | head -1)"
+"$NIMONY" j --browser -p:"$ROOT/src" "$ROOT/examples/ui/kanban.nim"
+f="$(find "$ROOT/nimcache/j" -name kanban.js | head -1)"
 if [ -z "$f" ]; then
-  echo "no generated kanban_js.js" >&2
+  echo "no generated kanban.js" >&2
   exit 1
 fi
 cp "$f" "$ROOT/examples/ui/kanban.js"
