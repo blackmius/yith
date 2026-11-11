@@ -24,13 +24,7 @@ type
 
   KanbanDrag* = object
     task*: Task
-    targets*: seq[DragTarget[Board]]
-
-const
-  BoardX* = 20.0
-  BoardY* = 74.0
-  ColW* = 220.0
-  CardH* = 64.0
+    states*: seq[Board]
 
 proc copyTasks(tasks: seq[Task]): seq[Task] =
   result = @[]
@@ -85,24 +79,16 @@ proc extractTask*(b: Board; id: int): Extracted =
       inc ti
     inc ci
 
-proc targetPoint*(b: Board; id, toCol, toPos: int): Point =
-  let ex = extractTask(b, id)
-  result = Point(x: BoardX + float(toCol) * ColW + ColW / 2.0,
-                 y: BoardY + float(toPos) * CardH + CardH / 2.0)
-
 proc buildDrag*(b: Board; id: int): KanbanDrag =
   let ex = extractTask(b, id)
-  result = KanbanDrag(task: ex.task, targets: @[])
+  result = KanbanDrag(task: ex.task, states: @[])
   if not ex.found:
     return
   var ci = 0
   while ci < ex.board.columns.len:
     var pos = 0
     while pos <= ex.board.columns[ci].tasks.len:
-      result.targets.add DragTarget[Board](
-        state: withTaskAt(ex.board, ci, pos, ex.task),
-        pos: Point(x: BoardX + float(ci) * ColW + ColW / 2.0,
-                   y: BoardY + float(pos) * CardH + CardH / 2.0))
+      result.states.add withTaskAt(ex.board, ci, pos, ex.task)
       inc pos
     inc ci
 
@@ -135,10 +121,6 @@ proc columnIndex*(b: Board; id: string): int =
       return ci
     inc ci
 
-proc columnPoint*(idx: int): Point =
-  result = Point(x: BoardX + float(idx) * ColW + ColW / 2.0,
-                 y: BoardY + 32.0)
-
 proc removeColumnState*(b: Board; ci: int): Board =
   result = Board(columns: @[])
   var i = 0
@@ -158,15 +140,13 @@ proc insertColumnState*(b: Board; ci: int; col: Column): Board =
   if ci >= b.columns.len:
     result.columns.add col
 
-proc buildColumnDrag*(b: Board; ci: int): seq[DragTarget[Board]] =
+proc buildColumnDrag*(b: Board; ci: int): seq[Board] =
   result = @[]
   let base = removeColumnState(b, ci)
   let col = b.columns[ci]
   var i = 0
   while i <= base.columns.len:
-    result.add DragTarget[Board](
-      state: insertColumnState(base, i, col),
-      pos: columnPoint(i))
+    result.add insertColumnState(base, i, col)
     inc i
 
 

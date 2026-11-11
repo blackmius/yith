@@ -1292,8 +1292,11 @@ type
 - `closest(targets).whenFar(fallback, radius).withFloating()` assembles the
   behavior; `start(drag, behavior, p)`, `move(drag, p)`,
   `finish(drag)`, `cancel(drag)`, `hasDrop(drag)`, `chosen(drag)`.
-- Target positions in the current slice come from the layout model/`rect()`;
-  speculative rendering of states and `lerpViews` are the next layer.
+- Target positions come from speculative rendering: candidate states are
+  rendered in a hidden DOM host, the dragged element is measured with
+  `getBoundingClientRect` (browser) or the small CSS layout pass (C tests),
+  and the measured centers become `DragTarget` positions. Plans no longer
+  hard-code row/column coordinates.
 - The `closest`/`between`/`whenFar`/`withFloating` operators are implemented as
   `DragBehavior`; `between` currently picks the nearest target, visual
   interpolation is the next layer. `vary`, `withSnapRadius`, `dropTarget`,
@@ -1323,13 +1326,17 @@ measure(view, selector, f) -> Point
 dispose(view)
 ```
 
-- `render` runs in a separate detached root via `beginRoot`,
-  so the live UI/scope is not touched;
-- `find`/`measure` work over the rendered tree;
-- measurement is an external callback: in the browser `getBoundingClientRect`,
-  in tests coordinates from attributes or the model;
-- this replaces manual layout functions in drag targets; integration with
-  `buildDrag` is the next step.
+- `render` runs in a hidden host via `beginRoot`, so the live UI/scope is
+  not touched;
+- the browser host is attached to `document.body` with `visibility:hidden`,
+  which keeps CSS layout active; `bounds` reads `getBoundingClientRect`;
+- the C test DOM runs a small CSS layout pass (block/flex, padding, gap,
+  absolute/fixed, translate);
+- `rect(view, selector)` returns the measured border box;
+- `speculativeTargets(states, render, selector)` renders each candidate,
+  measures the selected element, and returns `DragTarget`s whose `pos` is its
+  center. `examples/ui/rows.nim` and `kanban.nim` use this instead of manual
+  `rowPoint`/`tilePoint`/`targetPoint` functions.
 
 ### 5.12 Motion core
 

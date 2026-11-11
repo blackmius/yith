@@ -11,12 +11,20 @@ import yith/dom/api
 import yith/core
 import yith/dsl
 import yith/drag
+import yith/spec
 import ./kanban_model
 
 var board: State[Board] = newState(initialBoard())
 var dragCtl: DragController[Board] = newDragController[Board]()
 var dragTask: State[int] = newState(0)
 var dragTitle: State[string] = newState("")
+
+proc startCardDrag(dragCtl: DragController[Board]; board: State[Board];
+                   dragTask: State[int]; dragTitle: State[string];
+                   taskId: int; title: string; p: Point)
+proc startColumnDrag(dragCtl: DragController[Board]; board: State[Board];
+                     dragTask: State[int]; dragTitle: State[string];
+                     ci: int; p: Point)
 
 proc cardView(board: State[Board]; dragCtl: DragController[Board];
               dragTask: State[int]; dragTitle: State[string];
@@ -28,7 +36,7 @@ proc cardView(board: State[Board]; dragCtl: DragController[Board];
   on(result, "pointerdown", proc (e: Event) {.closure.} =
     dragTask.set(taskId)
     dragTitle.set(title)
-    dragCtl.start(closest(buildDrag(board.get(), taskId).targets).withFloating(),
+    startCardDrag(dragCtl, board, dragTask, dragTitle, taskId, title,
                   Point(x: e.clientX, y: e.clientY)))
 
 proc columnView(board: State[Board]; dragCtl: DragController[Board];
@@ -42,9 +50,8 @@ proc columnView(board: State[Board]; dragCtl: DragController[Board];
     on(head, "pointerdown", proc (e: Event) {.closure.} =
       dragTask.set(0)
       dragTitle.set(title)
-      let targets = buildColumnDrag(board.get(), ci)
-      dragCtl.start(between(targets).withFloating(),
-                    Point(x: e.clientX, y: e.clientY)))
+      startColumnDrag(dragCtl, board, dragTask, dragTitle, ci,
+                      Point(x: e.clientX, y: e.clientY)))
     var ti = 0
     while ti < board.get().columns[ci].tasks.len:
       discard cardView(board, dragCtl, dragTask, dragTitle,
@@ -82,6 +89,38 @@ proc boardView(board: State[Board]; dragCtl: DragController[Board];
         board.set(dragCtl.chosen().state)
       dragTask.set(0)
       dragTitle.set(""))
+
+
+proc renderBoard(s: Board; model: State[Board];
+                 dragCtl: DragController[Board];
+                 dragTask: State[int]; dragTitle: State[string]): E =
+  model.set(s)
+  result = boardView(model, dragCtl, dragTask, dragTitle)
+
+proc boardTargets(states: seq[Board]; selector: string): seq[DragTarget[Board]] =
+  let tmp = newState(initialBoard())
+  let rc = newDragController[Board]()
+  let t = newState(0)
+  let ti = newState("")
+  result = speculativeTargets(states,
+    proc (s: Board): E {.closure.} =
+      renderBoard(s, tmp, rc, t, ti),
+    selector)
+
+proc startCardDrag(dragCtl: DragController[Board]; board: State[Board];
+                   dragTask: State[int]; dragTitle: State[string];
+                   taskId: int; title: string; p: Point) =
+  let drag = buildDrag(board.get(), taskId)
+  let targets = boardTargets(drag.states, "#task-" & $taskId)
+  dragCtl.start(closest(targets).withFloating(), p)
+
+proc startColumnDrag(dragCtl: DragController[Board]; board: State[Board];
+                     dragTask: State[int]; dragTitle: State[string];
+                     ci: int; p: Point) =
+  let states = buildColumnDrag(board.get(), ci)
+  let col = board.get().columns[ci]
+  let targets = boardTargets(states, "#col-" & col.id)
+  dragCtl.start(closest(targets).withFloating(), p)
 
 proc debugState() {.exportc: "debugState".} =
   echo "active=", dragCtl.active.get(), " target=", dragCtl.target.get(),

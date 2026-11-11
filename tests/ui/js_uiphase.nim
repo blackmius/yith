@@ -4,6 +4,7 @@ import std/syncio
 import yith/dom/api
 import yith/core
 import yith/dsl
+import yith/uiblock
 
 proc View(): E {.ui.} =
   c.Div.root:

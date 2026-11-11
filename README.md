@@ -9,7 +9,16 @@ intended model of signals, DSL, slots and the drag-and-drop example is in
 
 - Nimony with plugin support: a template plugin (the `{.ui.}` syntax pass) and
   a post-sem module/type plugin (the state pass).
-- `jorogumo` from `nativenif` on `PATH` for `nimony j` (JS tests and examples).
+- `jorogumo` from `nativenif` for `nimony j` (JS tests and examples). Build it
+  once in a `nativenif` checkout whose sibling is `../nimony`:
+
+  ```sh
+  cd ../nativenif
+  nim c src/jorogumo/jorogumo.nim       # -> bin/jorogumo
+  ```
+
+  Then put `nativenif/bin` on `PATH`, or point the test runner at it with
+  `JOROGUMO_DIR=../nativenif/bin tests/ui/run_js.sh`.
 - The C tests need only the Nimony toolchain; they use the built-in test DOM.
 
 ## Layers
@@ -28,7 +37,7 @@ intended model of signals, DSL, slots and the drag-and-drop example is in
 | `async.nim` | passive effects without blocking the thread |
 | `fetch.nim` | `awaitText` on top of `fetch`/Promise |
 | `drag.nim` | model-driven drag controller: targets, closest, pointer, drop |
-| `spec.nim` | speculative render of target states into a detached DOM |
+| `spec.nim` | hidden DOM render/measure of target states (`speculativeTargets`) |
 | `motion.nim` | tween/spring interpolation + style binding |
 
 Public facade: `import yith/ui`.
@@ -135,15 +144,17 @@ Tests: `tests/ui/tuipragma.nim`, `tsugar.nim`, `tcomputed.nim`,
 
 ## Declarative dragging
 
-`drag.nim` is the first slice of declarative dragging: the application lists
-**target model states** and their positions, and the drag controller itself
-picks the nearest target under the pointer.
+`drag.nim` implements declarative dragging: the application lists **target
+model states**, the library renders each one into a hidden DOM host, measures
+the dragged element with the browser's CSS layout, and the controller picks
+the nearest target under the pointer.
 
 ```nim
 let dragCtl = newDragController[Board]()
 ```
 
-- `DragTarget[S]` — `state: S` + `pos: Point`;
+- `DragTarget[S]` — `state: S` + `pos: Point` (usually measured by
+  `speculativeTargets`);
 - `closest(targets)` — "nearest target" behaviour;
 - `between(targets)` — a combinator for a set of targets (in this slice it
   picks the nearest one; visual interpolation comes later);
@@ -157,10 +168,11 @@ let dragCtl = newDragController[Board]()
 Example `examples/ui/kanban.nim`:
 
 - on `pointerdown` a card builds all states "task inserted into each
-  column/position" (`buildDrag`) and their points
-  (`closest(...).withFloating()`);
-- the column header reorders columns via
-  `between(columnReorderStates).withFloating()`;
+  column/position" (`buildDrag`), renders them hidden, and measures the
+  dragged card (`closest(...).withFloating()`);
+- the column header reorders columns the same way (`buildColumnDrag`);
+- the component's normal CSS (flex columns/rows, padding, gaps) determines
+  the positions; there are no `targetPoint`/`rowPoint` tables;
 - `pointermove` picks the nearest point;
 - `pointerup` applies the `state` of the chosen target to `State[Board]`;
 - the ghost follows the pointer via `drag.pointer.get()`;
@@ -179,9 +191,9 @@ tests/ui/run.sh
 nimony c -d:yithDomTest -p:src examples/ui/kanban.nim -o:bin/kanban && ./bin/kanban
 ```
 
-Limitation: target positions come from the layout model/`rect()`; speculative
-rendering and `lerpViews`/Delaunay from Dragology are not implemented yet. That
-is the next layer. `dropTarget`, `switchToStateAndFollow`, `vary` and
+Limit: `between` still selects the nearest measured target instead of
+interpolating between DOM renders, and `lerpViews`/Delaunay from Dragology are
+not implemented yet. That is the next layer. `dropTarget`, `switchToStateAndFollow`, `vary` and
 `withSnapRadius` are missing too for now.
 
 ### Browser
@@ -201,8 +213,11 @@ examples is the C/test DOM (`tests/ui/run.sh`).
 
 ## Speculative rendering
 
-`spec.nim` renders a model state into a **separate detached DOM** without
-touching the live UI:
+`spec.nim` renders a model state into a **hidden, laid-out DOM host** without
+touching the live UI. In the browser the host is attached with
+`visibility:hidden`, so normal CSS layout is real and `bounds`/`rect` read
+`getBoundingClientRect`; the C test DOM has a small layout pass for
+block/flex flow, padding, gap, absolute positioning and translate:
 
 ```nim
 let views = speculate(@[state1, state2],

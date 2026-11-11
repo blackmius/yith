@@ -1,10 +1,10 @@
 ## Declarative dragging, first composable slice.
 ##
-## Model-driven part: an app enumerates target model states and their
-## positions. The controller tracks the pointer and the closest target.
-## `closest(...).whenFar(fallback).withFloating()` mirrors the Dragology
-## operators from the paper. Positions come from the layout model/`rect()`
-## in this slice; speculative rendering is a later layer.
+## Model-driven part: an app enumerates target model states. Their positions
+## come from speculative rendering (`spec.speculativeTargets`), which measures
+## real DOM/CSS layout in a hidden host. The controller tracks the pointer and
+## the closest target. `closest(...).whenFar(fallback).withFloating()` mirrors
+## the Dragology operators from the paper.
 
 import ./core
 

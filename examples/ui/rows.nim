@@ -28,7 +28,7 @@ type
 
   Plan* = object
     base*: Sheet
-    targets*: seq[DragTarget[Sheet]]
+    states*: seq[Sheet]
 
 const
   TileSize* = 50.0
@@ -53,14 +53,6 @@ proc clone*(s: Sheet): Sheet =
     result.rows.add Row(id: s.rows[i].id, color: s.rows[i].color,
                         items: copyTiles(s.rows[i].items))
     inc i
-
-proc rowPoint*(rowIdx: int): Point =
-  result = Point(x: 120.0, y: float(rowIdx) * (RowH + RowGap) + RowH / 2.0)
-
-proc tilePoint*(rowIdx, colIdx: int): Point =
-  result = Point(
-    x: GripW + GripPad + float(colIdx) * (TileSize + TileGap) + TileSize / 2.0,
-    y: float(rowIdx) * (RowH + RowGap) + RowPad + TileSize / 2.0)
 
 proc removeRowState*(s: Sheet; rowIdx: int): Sheet =
   result = Sheet(rows: @[])
@@ -100,26 +92,22 @@ proc insertTileState*(s: Sheet; rowIdx, colIdx: int; tile: Tile): Sheet =
   result.rows[rowIdx].items = items
 
 proc rowPlan*(s: Sheet; rowIdx: int): Plan =
-  result = Plan(base: removeRowState(s, rowIdx), targets: @[])
+  result = Plan(base: removeRowState(s, rowIdx), states: @[])
   let row = s.rows[rowIdx]
   var i = 0
   while i <= result.base.rows.len:
-    result.targets.add DragTarget[Sheet](
-      state: insertRowState(result.base, i, row),
-      pos: rowPoint(i))
+    result.states.add insertRowState(result.base, i, row)
     inc i
 
 proc tilePlan*(s: Sheet; rowIdx, tileIdx: int): Plan =
   let base = removeTileState(s, rowIdx, tileIdx)
   let tile = s.rows[rowIdx].items[tileIdx]
-  result = Plan(base: base, targets: @[])
+  result = Plan(base: base, states: @[])
   var r = 0
   while r < base.rows.len:
     var c = 0
     while c <= base.rows[r].items.len:
-      result.targets.add DragTarget[Sheet](
-        state: insertTileState(base, r, c, tile),
-        pos: tilePoint(r, c))
+      result.states.add insertTileState(base, r, c, tile)
       inc c
     inc r
 
@@ -154,23 +142,20 @@ proc rowIndex*(s: Sheet; id: string): int =
     inc r
 
 proc startTileDrag*(dragCtl: DragController[Sheet]; model: State[Sheet];
-                    rowIdx, tileIdx: int; p: Point) =
-  let plan = tilePlan(model.get(), rowIdx, tileIdx)
-  dragCtl.start(closest(plan.targets).whenFar(plan.base).withFloating(), p)
-
+                    rowIdx, tileIdx: int; p: Point)
 proc startRowDrag*(dragCtl: DragController[Sheet]; model: State[Sheet];
-                   rowIdx: int; p: Point) =
-  let plan = rowPlan(model.get(), rowIdx)
-  dragCtl.start(closest(plan.targets).whenFar(plan.base).withFloating(), p)
+                   rowIdx: int; p: Point)
 
 proc TileView*(model: State[Sheet]; dragCtl: DragController[Sheet];
                dragLabel: State[string]; dragColor: State[string];
                rowIdx, tileIdx: int; tile: Tile): E {.ui.} =
   c.Div.tile:
     attr.id("tile-" & tile.id)
-    css.transform("translate(" &
-      $(GripW + GripPad + float(tileIdx) * (TileSize + TileGap)) & "px, " &
-      $RowPad & "px)")
+    css.width($TileSize & "px")
+    css.height($TileSize & "px")
+    css.display("flex")
+    css.align_items("center")
+    css.justify_content("center")
     onPointerDown(e):
       dragLabel.set(tile.label)
       dragColor.set(model.get().rows[rowIdx].color)
@@ -184,11 +169,18 @@ proc RowView*(model: State[Sheet]; dragCtl: DragController[Sheet];
               rowIdx: int): E {.ui.} =
   c.Div.row:
     attr.id("row-" & model.get().rows[rowIdx].id)
-    css.transform("translate(0px, " &
-      $(float(rowIdx) * (RowH + RowGap)) & "px)")
+    css.display("flex")
+    css.align_items("center")
+    css.gap($TileGap & "px")
+    css.padding($RowPad & "px")
     css.background_color(model.get().rows[rowIdx].color)
     c.Div.grip:
       attr.id("grip-" & model.get().rows[rowIdx].id)
+      css.width($GripW & "px")
+      css.height($TileSize & "px")
+      css.display("flex")
+      css.align_items("center")
+      css.justify_content("center")
       onPointerDown(e):
         dragLabel.set(model.get().rows[rowIdx].id)
         dragColor.set(model.get().rows[rowIdx].color)
@@ -205,6 +197,10 @@ proc RowView*(model: State[Sheet]; dragCtl: DragController[Sheet];
 proc RowsView*(model: State[Sheet]; dragCtl: DragController[Sheet];
                dragLabel, dragColor: State[string]): E {.ui.} =
   c.Div.rows:
+    css.display("flex")
+    css.flex_direction("column")
+    css.gap($RowGap & "px")
+    css.padding("8px")
     onPointerMove(e):
       if dragCtl.active.get():
         discard dragCtl.move(Point(x: e.clientX, y: e.clientY))
@@ -229,6 +225,42 @@ proc RowsView*(model: State[Sheet]; dragCtl: DragController[Sheet];
           c.Span.tile_label:
             dragLabel.get())
 
+
+proc renderSheet(s: Sheet; model: State[Sheet];
+                 dragCtl: DragController[Sheet];
+                 dragLabel, dragColor: State[string]): E =
+  model.set(s)
+  result = RowsView(model, dragCtl, dragLabel, dragColor)
+
+proc planTargets(plan: Plan; model: State[Sheet];
+                 dragCtl: DragController[Sheet];
+                 dragLabel, dragColor: State[string];
+                 selector: string): seq[DragTarget[Sheet]] =
+  let tmp = newState(plan.base)
+  let rc = newDragController[Sheet]()
+  let lbl = newState("")
+  let col = newState("")
+  result = speculativeTargets(plan.states,
+    proc (s: Sheet): E {.closure.} =
+      renderSheet(s, tmp, rc, lbl, col),
+    selector)
+
+proc startTileDrag*(dragCtl: DragController[Sheet]; model: State[Sheet];
+                    rowIdx, tileIdx: int; p: Point) =
+  let plan = tilePlan(model.get(), rowIdx, tileIdx)
+  let tile = model.get().rows[rowIdx].items[tileIdx]
+  let targets = planTargets(plan, model, dragCtl,
+                            newState(""), newState(""), "#tile-" & tile.id)
+  dragCtl.start(closest(targets).whenFar(plan.base).withFloating(), p)
+
+proc startRowDrag*(dragCtl: DragController[Sheet]; model: State[Sheet];
+                   rowIdx: int; p: Point) =
+  let plan = rowPlan(model.get(), rowIdx)
+  let row = model.get().rows[rowIdx]
+  let targets = planTargets(plan, model, dragCtl,
+                            newState(""), newState(""), "#row-" & row.id)
+  dragCtl.start(closest(targets).whenFar(plan.base).withFloating(), p)
+
 let root = createElement("div")
 let sc = beginRoot(root)
 let model = newState(Sheet(rows: @[
@@ -251,8 +283,8 @@ echo toHtml(root)
 # A1 from row1/col0 to row2/col1.
 let tile = find(root, "#tile-A1")
 let rowsNode = find(root, ".rows")
-let p = tilePoint(1, 1)
 discard fireAt(tile, "pointerdown", 100.0, 100.0)
+let p = dragCtl.targets[4].pos
 discard fireAt(rowsNode, "pointermove", p.x, p.y)
 discard fireAt(rowsNode, "pointerup", p.x, p.y)
 echo "A1 row/col = ", tileRow(model.get(), "A1"), "/",
@@ -260,8 +292,8 @@ echo "A1 row/col = ", tileRow(model.get(), "A1"), "/",
 
 # row1 below row2: row order becomes row2, row1, row3.
 let grip = find(root, "#grip-row1")
-let rp = rowPoint(1)
 discard fireAt(grip, "pointerdown", 10.0, 10.0)
+let rp = dragCtl.targets[1].pos
 discard fireAt(rowsNode, "pointermove", rp.x, rp.y)
 discard fireAt(rowsNode, "pointerup", rp.x, rp.y)
 echo "row1 index = ", rowIndex(model.get(), "row1")

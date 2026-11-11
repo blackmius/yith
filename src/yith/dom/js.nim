@@ -14,6 +14,7 @@ var handlers: seq[Handler]
 var ensured = false
 
 proc createElement*(tag: string): Node {.importjs: "document.createElement(#)".}
+proc documentBody(): Node {.importjs: "document.body".}
 proc createTextNode*(text: string): Node {.importjs: "document.createTextNode(#)".}
 proc createComment*(text: string): Node {.importjs: "document.createComment(#)".}
 proc appendChild*(parent, child: Node) {.importjs: "#.appendChild(#)".}
@@ -61,3 +62,22 @@ proc nextSibling*(n: Node): Node {.importjs: "#.nextSibling".}
 proc parentNode*(n: Node): Node {.importjs: "#.parentNode".}
 
 proc jsStringify*(n: Node): string {.importjs: "JSON.stringify(#)".}
+
+proc rectLeft(n: Node): float {.importjs: "#.getBoundingClientRect().left".}
+proc rectTop(n: Node): float {.importjs: "#.getBoundingClientRect().top".}
+proc rectWidth(n: Node): float {.importjs: "#.getBoundingClientRect().width".}
+proc rectHeight(n: Node): float {.importjs: "#.getBoundingClientRect().height".}
+
+proc bounds*(n: Node): Rect =
+  result = Rect(x: rectLeft(n), y: rectTop(n),
+                w: rectWidth(n), h: rectHeight(n))
+
+proc createHiddenHost*(): Node =
+  ## A hidden, laid-out container. `visibility: hidden` (not
+  ## `display: none`) keeps CSS layout active so `getBoundingClientRect`
+  ## reports real geometry.
+  result = createElement("div")
+  setAttribute(result, "style",
+    "position:absolute;left:-100000px;top:0;visibility:hidden;" &
+    "pointer-events:none;")
+  appendChild(documentBody(), result)

@@ -28,6 +28,8 @@ type
     children*: seq[Node]
     parent*: Node
     handlers*: seq[Handler]
+    computed*: Rect
+    layW*, layH*: float
 
 proc scheduleMicrotask*(cb: proc () {.nimcall.}) =
   ## The test backend has no event loop: run the flush now. Tests are
@@ -310,3 +312,207 @@ proc nextSibling*(n: Node): Node =
 
 proc parentNode*(n: Node): Node =
   result = n.parent
+
+
+# ---------------------------------------------------------------- CSS layout
+# A deliberately small subset of CSS, enough for speculative drag rendering:
+# block/flex flow, explicit width/height, padding, gap, absolute/fixed
+# positioning and translate transforms. It is not a browser engine; it keeps
+# the C tests deterministic while the real DOM backend uses the browser.
+
+proc isSpace(c: char): bool = c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+proc trim(s: string): string =
+  var a = 0
+  var b = s.len
+  while a < b and isSpace(s[a]): inc a
+  while b > a and isSpace(s[b - 1]): dec b
+  result = s[a ..< b]
+
+proc parseNumber(s: string; ok: var bool): float =
+  result = 0.0
+  ok = false
+  var i = 0
+  while i < s.len and isSpace(s[i]): inc i
+  var sign = 1.0
+  if i < s.len and (s[i] == '-' or s[i] == '+'):
+    if s[i] == '-': sign = -1.0
+    inc i
+  var any = false
+  while i < s.len and s[i] >= '0' and s[i] <= '9':
+    result = result * 10.0 + float(ord(s[i]) - ord('0'))
+    any = true
+    inc i
+  if i < s.len and s[i] == '.':
+    inc i
+    var frac = 0.1
+    while i < s.len and s[i] >= '0' and s[i] <= '9':
+      result = result + float(ord(s[i]) - ord('0')) * frac
+      frac = frac * 0.1
+      any = true
+      inc i
+  if any:
+    result = result * sign
+    ok = true
+
+proc styleValue(n: Node; name: string): string =
+  var i = 0
+  while i < n.attrs.len:
+    if n.attrs[i][0] == "style":
+      let style = n.attrs[i][1]
+      var start = 0
+      while start <= style.len:
+        var stop = start
+        while stop < style.len and style[stop] != ';': inc stop
+        let part = trim(style[start ..< stop])
+        var colon = -1
+        var j = 0
+        while j < part.len:
+          if part[j] == ':': colon = j
+          inc j
+        if colon >= 0:
+          let key = trim(part[0 ..< colon])
+          if key == name:
+            return trim(part[colon + 1 ..< part.len])
+        start = stop + 1
+    inc i
+  result = ""
+
+proc lengthOf(n: Node; name: string; fallback: float): float =
+  let v = styleValue(n, name)
+  if v.len == 0 or v == "auto": return fallback
+  var ok = false
+  let f = parseNumber(v, ok)
+  if ok: result = f else: result = fallback
+
+proc firstLengthOf(n: Node; name: string; fallback: float): float =
+  let v = styleValue(n, name)
+  if v.len == 0: return fallback
+  var ok = false
+  let f = parseNumber(v, ok)
+  if ok: result = f else: result = fallback
+
+proc paddingOf(n: Node): float =
+  result = firstLengthOf(n, "padding", 0.0)
+
+proc gapOf(n: Node): float =
+  result = firstLengthOf(n, "gap", 0.0)
+
+proc isOutOfFlow(n: Node): bool =
+  let p = styleValue(n, "position")
+  result = p == "absolute" or p == "fixed"
+
+proc translateOf(n: Node; tx, ty: var float) =
+  tx = 0.0
+  ty = 0.0
+  let t = styleValue(n, "transform")
+  if t.len == 0 or t == "none": return
+  var open = -1
+  var i = 0
+  while i < t.len:
+    if t[i] == '(':
+      open = i
+      break
+    inc i
+  if open < 0: return
+  var j = open + 1
+  var ok = false
+  tx = parseNumber(t[j ..< t.len], ok)
+  if not ok: return
+  while j < t.len and t[j] != ',': inc j
+  if j < t.len:
+    ty = parseNumber(t[j + 1 ..< t.len], ok)
+
+proc measureNode(n: Node) =
+  case n.kind
+  of nkText:
+    n.layW = float(n.text.len) * 7.0
+    n.layH = 16.0
+  of nkComment:
+    n.layW = 0.0
+    n.layH = 0.0
+  of nkElement:
+    let pad = paddingOf(n)
+    let gap = gapOf(n)
+    let display = styleValue(n, "display")
+    let direction = styleValue(n, "flex-direction")
+    var cw = 0.0
+    var ch = 0.0
+    var first = true
+    var i = 0
+    while i < n.children.len:
+      let child = n.children[i]
+      if child.kind != nkElement or not isOutOfFlow(child):
+        measureNode(child)
+        if display == "flex" and direction != "column":
+          if not first: cw = cw + gap
+          cw = cw + child.layW
+          if child.layH > ch: ch = child.layH
+        elif display == "flex":
+          if not first: ch = ch + gap
+          ch = ch + child.layH
+          if child.layW > cw: cw = child.layW
+        else:
+          if child.layW > cw: cw = child.layW
+          ch = ch + child.layH
+        first = false
+      inc i
+    n.layW = cw + pad * 2.0
+    n.layH = ch + pad * 2.0
+    let ew = lengthOf(n, "width", -1.0)
+    let eh = lengthOf(n, "height", -1.0)
+    if ew >= 0.0: n.layW = ew
+    if eh >= 0.0: n.layH = eh
+
+proc placeNode(n: Node; x, y: float) =
+  var tx = 0.0
+  var ty = 0.0
+  translateOf(n, tx, ty)
+  n.computed = Rect(x: x + tx, y: y + ty, w: n.layW, h: n.layH)
+  if n.kind != nkElement: return
+  let pad = paddingOf(n)
+  let gap = gapOf(n)
+  let display = styleValue(n, "display")
+  let direction = styleValue(n, "flex-direction")
+  var cx = x + tx + pad
+  var cy = y + ty + pad
+  var first = true
+  var i = 0
+  while i < n.children.len:
+    let child = n.children[i]
+    if child.kind != nkElement or not isOutOfFlow(child):
+      if display == "flex" and direction != "column":
+        if not first: cx = cx + gap
+        placeNode(child, cx, cy)
+        cx = cx + child.layW
+      elif display == "flex":
+        if not first: cy = cy + gap
+        placeNode(child, cx, cy)
+        cy = cy + child.layH
+      else:
+        placeNode(child, cx, cy)
+        cy = cy + child.layH
+      first = false
+    inc i
+  i = 0
+  while i < n.children.len:
+    let child = n.children[i]
+    if child.kind == nkElement and isOutOfFlow(child):
+      let left = lengthOf(child, "left", 0.0)
+      let top = lengthOf(child, "top", 0.0)
+      if styleValue(child, "position") == "fixed":
+        placeNode(child, left, top)
+      else:
+        placeNode(child, x + tx + left, y + ty + top)
+    inc i
+
+proc bounds*(n: Node): Rect =
+  var root = n
+  while root.parent != nil: root = root.parent
+  measureNode(root)
+  placeNode(root, 0.0, 0.0)
+  result = n.computed
+
+proc createHiddenHost*(): Node =
+  result = createElement("div")
+  setAttribute(result, "style", "position:absolute;left:-100000px;top:0;")
