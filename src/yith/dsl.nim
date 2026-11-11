@@ -525,7 +525,12 @@ template When*(cond: untyped; thenBody: untyped; elseBody: untyped): E =
 # --------------------------------------------------------------------- events
 
 proc on*(e: E; event: string; cb: proc (ev: Event) {.closure.}) =
-  addEventListener(e.startNode, event, cb)
+  ## Event handlers never subscribe to the states they read: reading a state
+  ## in a handler must not allocate a `Sub`. `withoutTracking` also leaves
+  ## `tracking` false if the handler raises.
+  addEventListener(e.startNode, event, proc (ev: Event) {.closure.} =
+    withoutTrackingStmt:
+      cb(ev))
   onCleanup(proc () {.closure.} =
     removeEventListener(e.startNode, event))
 

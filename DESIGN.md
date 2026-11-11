@@ -1328,7 +1328,7 @@ SpecView[S] = object
 speculateOne(state, render) -> SpecView
 speculate(states, render) -> seq[SpecView]
 rect(view, selector) -> Rect
-speculativeTargets(states, render, selector) -> seq[DragTarget[S]]
+speculativeTargets(states, render, selector, origin) -> seq[DragTarget[S]]
 dispose(view)
 ```
 
@@ -1339,10 +1339,12 @@ dispose(view)
 - the C test DOM runs a small CSS layout pass (block/flex, padding, gap,
   absolute/fixed, translate);
 - `rect(view, selector)` returns the measured border box;
-- `speculativeTargets(states, render, selector)` renders each candidate,
-  measures the selected element, and returns `DragTarget`s whose `pos` is its
-  center. `examples/ui/rows.nim` and `kanban.nim` use this instead of manual
-  `rowPoint`/`tilePoint`/`targetPoint` functions.
+- `speculativeTargets(states, render, selector, origin)` renders each
+  candidate, measures the selected element, and returns `DragTarget`s whose
+  `pos` is its center. `origin` is the live render root; its rect is added to
+  the host-relative measurement, so browser targets and pointer events share
+  the client coordinate frame. `examples/ui/rows.nim` and `kanban.nim` use
+  this instead of manual `rowPoint`/`tilePoint`/`targetPoint` functions.
 
 ### 5.12 Motion core
 

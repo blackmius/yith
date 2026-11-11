@@ -66,29 +66,59 @@ proc centerOf(r: Rect): Point =
 
 proc speculativeTargets*[S](states: seq[S];
                             render: proc (s: S): E {.closure.};
-                            selector: string): seq[DragTarget[S]] =
+                            selector: string;
+                            origin: Node = nil): seq[DragTarget[S]] =
   ## Render every candidate state into the hidden host, measure the element
   ## matching `selector`, and use its center as the drop position. This is
   ## how drag plans stop hard-coding row/column coordinates: the component's
   ## own CSS decides where things land.
+  ##
+  ## The hidden host is placed off-screen in the browser, so `bounds` reports
+  ## coordinates shifted by the host's own origin. Pass the live render root
+  ## as `origin` to express the targets in the same client coordinate frame
+  ## as pointer events; without it the measured coordinates are only useful
+  ## when the caller compares them in the hidden host's frame (the C/test DOM
+  ## backend re-roots every measurement at 0,0).
   result = @[]
+  var ox = 0.0
+  var oy = 0.0
+  if origin != nil:
+    let o = bounds(origin)
+    ox = o.x
+    oy = o.y
   var i = 0
   while i < states.len:
     let v = speculateOne(states[i], render)
     let r = rect(v, selector)
-    result.add DragTarget[S](state: states[i], pos: centerOf(r))
+    var p = centerOf(r)
+    if origin != nil:
+      let h = bounds(v.root)
+      p.x = p.x - h.x + ox
+      p.y = p.y - h.y + oy
+    result.add DragTarget[S](state: states[i], pos: p)
     dispose(v)
     inc i
 
 proc speculativeTargets*[S](states: seq[S];
                             render: proc (s: S): E {.closure.};
-                            selector: proc (s: S): string {.closure.}):
-                            seq[DragTarget[S]] =
+                            selector: proc (s: S): string {.closure.};
+                            origin: Node = nil): seq[DragTarget[S]] =
   result = @[]
+  var ox = 0.0
+  var oy = 0.0
+  if origin != nil:
+    let o = bounds(origin)
+    ox = o.x
+    oy = o.y
   var i = 0
   while i < states.len:
     let v = speculateOne(states[i], render)
     let r = rect(v, selector(states[i]))
-    result.add DragTarget[S](state: states[i], pos: centerOf(r))
+    var p = centerOf(r)
+    if origin != nil:
+      let h = bounds(v.root)
+      p.x = p.x - h.x + ox
+      p.y = p.y - h.y + oy
+    result.add DragTarget[S](state: states[i], pos: p)
     dispose(v)
     inc i

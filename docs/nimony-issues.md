@@ -1145,8 +1145,9 @@ Use distinct type names. yith exposes `Resource[T]` and
 ## 27. JS: scope teardown after a DOM re-render crashes in DataView/dealloc
 
 **Labels:** bug, js-backend, runtime, memory
-**Severity:** high (browser kanban crashes on drop)
-**Status:** open on `2c5b3dca`.
+**Severity:** high (browser kanban crashed on drop)
+**Status:** fixed in yith on `2c5b3dca`; the unsafe shape remains accepted by
+the backend.
 
 ### Summary
 A reactive subtree built with `uiBlock` renders initially, but after a state
@@ -1177,11 +1178,112 @@ The initial board renders. After a simulated card drop the first flush crashes
 while disposing the old `uiBlock` subtree. The same example works on the C/test
 DOM backend (`examples/ui/kanban.nim`).
 
-### Impact
-The experimental browser wrapper can show the initial board but cannot complete
-a drag/drop state transition until the JS scope teardown path is fixed (or a
-non-tearing render path is introduced). C/test DOM remains the supported target
-for the declarative-drag examples.
+### Root cause
+`importjs` represents a host JS value as an int32 **handle** into the host
+table (`ewrap`/`eunwrap`), but a binding that declares the value as `ref object`
+is still reference counted by ARC away from a splice. `killScope` therefore
+called `arcDec` on the handle's *numeric value* (a low memory address, not an
+ARC cell) and then `deallocFixed` on it. That corrupted allocator metadata and
+eventually read outside the `ArrayBuffer`.
+
+### Fix
+Opaque host values are declared as `ptr` in `src/yith/dom/js.nim`
+(`Node`, `Event`). Pointers are handles at the splice boundary but have no ARC
+hooks, so a `seq[Node]` / `Scope.nodes` teardown neither increments nor frees
+anything. `tests/ui/js_teardown.nim` now covers nested fragment re-rendering.
+
+The backend still accepts `ref object` for a host binding, which is a footgun:
+any copy, field, or seq of such a value corrupts memory. A follow-up should
+either reject that combination or mark handle types explicitly.
+
+## 28. JS: derived state captured in a nested attribute closure dangles after teardown
+
+**Labels:** bug, js-backend, runtime, memory, closures
+**Severity:** high (browser kanban crashed during drag)
+**Status:** open in the backend; worked around in yith.
+
+### Summary
+A `computedExpr` written inline in an attribute closure can be hoisted into the
+enclosing component's closure environment, which is shared with its re-runnable
+`uiBlock` body. The env slot is not reference counted. The element/effect
+teardown releases the derived `State`, but the slot still points at it; the
+next render's generated "destroy old value" path calls `arcDec` on the freed
+cell and eventually reads outside the `ArrayBuffer`:
+
+```text
+RangeError: Offset is outside the bounds of the DataView
+  at n_arcDec
+  at n__anonproc_21 (ghost attribute closure)
+  at n_uiBlock_1
+  at n_drain
+```
+
+This is what remained after the opaque-handle fix (#27): the handle itself was
+no longer reference counted, but the per-render `computedExpr` state still was.
+
+### Workaround
+`css.*` and `cls.*` state-reading values, and state-reading `Text(...)`
+arguments, are lowered to **lazy getters**:
+
+```nim
+css.left($dragCtl.pointer.get().x & "px")
+# -> addStyle(e, "left", proc (): string = ...)
+
+Text(board.get().columns[ci].title)
+# -> Text(proc (): string = $...)
+```
+
+`addStyle`/`addClass` store the getter in the `StylePart`/`ClassPart`; `setAttr`,
+`setBoolAttr` and `Text` evaluate their getter from an effect. No derived
+`State` is created at the call site, so there is no env slot to dangle.
+`prop`/`setProp` with a state-reading *expression* still goes through
+`computedExpr`; state-typed props (`State[T]`) are unaffected.
+`tests/ui/js_lazy.nim` covers repeated show/hide/re-render.
+
+## 29. JS: scope ref cycles caused recursive destruction and lost DOM nodes
+
+**Labels:** bug, js-backend, runtime, memory, scopes
+**Severity:** high (repeated drag previews lost columns/cards; eventual
+`Maximum call stack size exceeded`)
+**Status:** fixed in yith.
+
+### Summary
+Holding/dragging a card could eventually throw:
+
+```text
+RangeError: Maximum call stack size exceeded
+  at n__destroy_Scope
+  at n__destroy_Scope
+  ...
+```
+
+and, before that, repeated `board.set(...)` previews could silently drop a
+column or a card from the DOM.
+
+### Root cause
+The runtime's scope graph contains several strong cycles:
+
+- `Scope.children` ↔ `Scope.parent`
+- `Signal.head` ↔ `Sub.prev/next` ↔ `Sub.scope` ↔ `Scope.subs`
+
+`killScope` cleared `children` and `subs`, but a dead scope kept its `parent`
+and a dead `Sub` kept its `scope`. Dead scopes also stay reachable from the
+global `pending` queue for the rest of the drain. Destroying a `Sub` therefore
+destroyed its scope again, which destroyed its `Sub`s, and so on.
+
+Adding the lazy attribute/text effects made the number of short-lived scopes
+large enough that the bug reproduced reliably.
+
+### Fix
+`src/yith/core.nim` now breaks the cycles when an edge dies:
+
+- `unlink(sub)` sets `sub.scope = nil` after removing it from the signal list;
+- `killScope` sets each killed child's `parent = nil`;
+- `dispose` sets `sc.parent = nil` after unlinking it from its parent.
+
+With the cycles broken, the browser kanban holds up over hundreds of preview
+re-renders; `for column in board.get().columns:` and the `State[Column]`
+component API are both fine.
 
 ---
 

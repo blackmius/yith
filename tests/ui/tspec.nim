@@ -34,6 +34,18 @@ if r0.y != 10.0 or r0.h != 16.0:
 if targets[0].pos.y != 18.0 or targets[1].pos.y != 28.0:
   panic("speculative target measurement mismatch")
 
+# An explicit origin moves targets into the live frame. Without it the hidden
+# host's off-screen offset would leak into the browser's client coordinates.
+let origin = createElement("div")
+setAttribute(origin, "style", "transform: translate(100px, 50px)")
+let base = speculativeTargets(@[Row(id: 1, y: 10.0)], renderRow, "#row-1")
+let shifted = speculativeTargets(@[Row(id: 1, y: 10.0)], renderRow,
+                                 "#row-1", origin)
+echo "shifted=", shifted[0].pos.x, ",", shifted[0].pos.y
+if shifted[0].pos.x != base[0].pos.x + 100.0 or
+   shifted[0].pos.y != base[0].pos.y + 50.0:
+  panic("speculative target origin shift mismatch")
+
 i = 0
 while i < views.len:
   dispose(views[i])

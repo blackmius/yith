@@ -32,7 +32,9 @@ type
     base*: Sheet
     states*: seq[Sheet]
 
-var dragStart: State[Sheet]
+var
+  dragStart: State[Sheet]
+  liveRoot: Node
 
 const
   TileSize* = 50.0
@@ -252,7 +254,7 @@ proc planTargets(plan: Plan; model: State[Sheet];
   result = speculativeTargets(plan.states,
     proc (s: Sheet): E {.closure.} =
       renderSheet(s, tmp, rc, lbl, col),
-    selector)
+    selector, liveRoot)
 
 proc startTileDrag*(dragCtl: DragController[Sheet]; model: State[Sheet];
                     rowIdx, tileIdx: int; p: Point) =
@@ -271,6 +273,7 @@ proc startRowDrag*(dragCtl: DragController[Sheet]; model: State[Sheet];
   dragCtl.start(closest(targets).whenFar(plan.base).withFloating(), p)
 
 let root = createElement("div")
+liveRoot = root
 let sc = beginRoot(root)
 let model = newState(Sheet(rows: @[
   Row(id: "row1", color: "#f0f4ff", items: @[

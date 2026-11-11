@@ -21,19 +21,22 @@ import yith/spec
 import yith/dom/api
 import ./kanban_model
 
+const kanbanBuild* = "cyclefix-2"
+
 var
   board: State[Board]
   dragCtl: DragController[Board] = newDragController[Board]()
   dragStart: State[Board]
   dragTask: State[int]
   dragTitle: State[string]
+  liveRoot: Node
 
 proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
                     dragTask: State[int]; dragTitle: State[string];
                     taskId: int; title: string; p: Point)
 proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
                       dragTask: State[int]; dragTitle: State[string];
-                      ci: int; p: Point)
+                      columnId: string; p: Point)
 
 proc CardView*(board: State[Board]; dragCtl: DragController[Board];
                dragTask: State[int]; dragTitle: State[string];
@@ -46,6 +49,8 @@ proc CardView*(board: State[Board]; dragCtl: DragController[Board];
     css.padding("0 8px")
     cls.dragging(dragCtl.active.get() and dragTask.get() == taskId)
     onPointerDown(e):
+      if debugLogEnabled:
+        debugLog("pointerdown card " & $taskId)
       dragStart.set(board.get())
       dragTask.set(taskId)
       dragTitle.set(title)
@@ -54,37 +59,35 @@ proc CardView*(board: State[Board]; dragCtl: DragController[Board];
     c.Span.task_title:
       title
 
-proc ColumnView*(board: State[Board]; dragCtl: DragController[Board];
-                 dragTask: State[int]; dragTitle: State[string];
-                 ci: int): E {.ui.} =
+proc ColumnView*(board: State[Board]; column: State[Column];
+                 dragCtl: DragController[Board];
+                 dragTask: State[int]; dragTitle: State[string]): E {.ui.} =
   c.Div.col:
     css.width("220px")
     css.display("flex")
     css.flex_direction("column")
     css.gap("8px")
     css.padding("8px")
-    cls.drop(isDropColumn(dragCtl, dragTask.get(), ci))
+    cls.drop(isDropColumn(dragCtl, dragTask.get(), column.get().id))
     cls.dragging(dragCtl.active.get() and dragTask.get() == 0 and
-      dragTitle.get() == board.get().columns[ci].title)
+      dragTitle.get() == column.get().title)
     c.Div.col_head:
-      attr.id("col-" & board.get().columns[ci].id)
+      attr.id("col-" & column.get().id)
       css.height("32px")
       css.display("flex")
       css.align_items("center")
       onPointerDown(e):
+        if debugLogEnabled:
+          debugLog("pointerdown column " & column.get().id)
         dragStart.set(board.get())
         dragTask.set(0)
-        dragTitle.set(board.get().columns[ci].title)
-        startColumnDrag(dragCtl, board, dragTask, dragTitle, ci,
-                        Point(x: e.clientX, y: e.clientY))
+        dragTitle.set(column.get().title)
+        startColumnDrag(dragCtl, board, dragTask, dragTitle,
+                        column.get().id, Point(x: e.clientX, y: e.clientY))
       c.Span.col_title:
-        board.get().columns[ci].title
-    var ti = 0
-    while ti < board.get().columns[ci].tasks.len:
-      CardView(board, dragCtl, dragTask, dragTitle,
-        board.get().columns[ci].tasks[ti].id,
-        board.get().columns[ci].tasks[ti].title)
-      inc ti
+        column.get().title
+    for task in column.get().tasks:
+      CardView(board, dragCtl, dragTask, dragTitle, task.id, task.title)
 
 proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
                  dragTask: State[int]; dragTitle: State[string]): E {.ui.} =
@@ -95,9 +98,17 @@ proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
     css.padding("20px")
     onPointerMove(e):
       if dragCtl.active.get():
+        let prevTarget = dragCtl.target.get()
+        let prevFar = dragCtl.far.get()
         discard dragCtl.move(Point(x: e.clientX, y: e.clientY))
-        board.set(dragCtl.previewState(dragStart.get()))
+        # Re-render the board only when the drop target changes. Rebuilding
+        # the whole column tree on every pointer move is both expensive and
+        # what made long drags exhaust the JS backend's shadow stack.
+        if dragCtl.target.get() != prevTarget or dragCtl.far.get() != prevFar:
+          board.set(dragCtl.previewState(dragStart.get()))
     onPointerUp(e):
+      if debugLogEnabled:
+        debugLog("pointerup")
       if dragCtl.active.get():
         discard dragCtl.finish()
         if dragCtl.hasDrop():
@@ -107,10 +118,8 @@ proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
         dragTask.set(0)
         dragTitle.set("")
     uiBlock(proc () {.closure.} =
-      var ci = 0
-      while ci < board.get().columns.len:
-        ColumnView(board, dragCtl, dragTask, dragTitle, ci)
-        inc ci
+      for column in board.get().columns:
+        ColumnView(board, newState(column), dragCtl, dragTask, dragTitle)
       if dragCtl.active.get():
         c.Div.ghost:
           css.position("fixed")
@@ -134,7 +143,7 @@ proc boardTargets(states: seq[Board]; selector: string): seq[DragTarget[Board]] 
   result = speculativeTargets(states,
     proc (s: Board): E {.closure.} =
       renderBoard(s, tmp, rc, t, ti),
-    selector)
+    selector, liveRoot)
 
 proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
                     dragTask: State[int]; dragTitle: State[string];
@@ -145,29 +154,87 @@ proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
 
 proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
                       dragTask: State[int]; dragTitle: State[string];
-                      ci: int; p: Point) =
+                      columnId: string; p: Point) =
+  let ci = columnIndex(board.get(), columnId)
+  if ci < 0:
+    return
   let states = buildColumnDrag(board.get(), ci)
-  let col = board.get().columns[ci]
-  let targets = boardTargets(states, "#col-" & col.id)
+  let targets = boardTargets(states, "#col-" & columnId)
   dragCtl.start(closest(targets).withFloating(), p)
 
 proc beginKanban(parent: Node): Scope =
+  liveRoot = parent
   board = newState(initialBoard())
   dragCtl = newDragController[Board]()
   dragStart = newState(board.get())
   dragTask = newState(0)
   dragTitle = newState("")
+  debugFocusSigs = @[signalId(dragStart), signalId(dragTask),
+                     signalId(dragTitle), signalId(board),
+                     signalId(dragCtl.active), signalId(dragCtl.target),
+                     signalId(dragCtl.pointer)]
   result = beginRoot(parent)
   discard KanbanView(board, dragCtl, dragTask, dragTitle)
 
 proc start(parent: Node) {.exportc: "start".} =
+  debugLogEnabled = true
+  debugLog("yith kanban " & kanbanBuild)
   discard beginKanban(parent)
+  captureStackBase()
   flushFile(stdout)
 
 proc debugState() {.exportc: "debugState".} =
   echo "active=", dragCtl.active.get(), " target=", dragCtl.target.get(),
        " far=", dragCtl.far.get(), " targets=", dragCtl.targets.len
+  var i = 0
+  while i < dragCtl.targets.len:
+    echo "  target ", i, ": ", dragCtl.targets[i].pos.x, ",",
+         dragCtl.targets[i].pos.y
+    inc i
   flushFile(stdout)
+
+proc debugSignals() {.exportc: "debugSignals".} =
+  ## Print the live subscriber counts and pending work. Call from the browser
+  ## console as `NIF.debugSignals()`; a crash while walking a list means that
+  ## signal's Sub chain is already corrupted.
+  debugLog("signals start sig=" & $signalId(dragStart) &
+           " subs=" & $subscriberCount(dragStart) &
+           " | task sig=" & $signalId(dragTask) &
+           " subs=" & $subscriberCount(dragTask) &
+           " | title sig=" & $signalId(dragTitle) &
+           " subs=" & $subscriberCount(dragTitle) &
+           " | board sig=" & $signalId(board) &
+           " subs=" & $subscriberCount(board))
+
+proc setDebug(b: bool) {.exportc: "setDebug".} =
+  debugLogEnabled = b
+
+proc dumpLog() {.exportc: "dumpLog".} =
+  dumpDebugLog()
+
+proc clearLog() {.exportc: "clearLog".} =
+  clearDebugLog()
+
+proc debugMemory() {.exportc: "debugMemory".} =
+  debugLog(memoryInfo())
+
+proc testGet() {.exportc: "testGet".} =
+  ## Stack-leak bisect: many tracked reads in one effect.
+  debugLog("testGet before " & stackInfo())
+  let sc = effect(proc () {.closure.} =
+    var i = 0
+    while i < 10000:
+      discard board.get()
+      inc i)
+  debugLog("testGet effect " & stackInfo())
+  dispose(sc)
+  debugLog("testGet dispose " & stackInfo())
+
+proc dumpMemory() {.exportc: "dumpMemory".} =
+  debugLog(memoryInfo())
+
+proc dumpStack() {.exportc: "dumpStack".} =
+  debugLog(stackInfo())
 
 when defined(yithDomTest):
   let root1 = createElement("div")
@@ -205,5 +272,5 @@ when defined(yithDomTest):
   endRoot()
   dispose(sc2)
 else:
-  echo "init"
+  echo "init ", kanbanBuild
   flushFile(stdout)

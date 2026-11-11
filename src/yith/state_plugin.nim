@@ -750,6 +750,25 @@ proc tryKeyedLoop(n: var NifCursor; b: var NifBuilder): bool =
     b.addTree renderLam
   result = true
 
+proc emitLazyValue(n: var NifCursor; b: var NifBuilder; retType: string;
+                   stringify = false) =
+  ## `watchValue(proc (): RET {.closure.} = expr)`. The named `watchValue`
+  ## keeps the derived State in its own frame, so closure conversion cannot
+  ## hoist it into the caller's shared environment. `stringify` emits `$expr`
+  ## for text/attribute positions.
+  var body = createTree()
+  body.withTree StmtsS, n.info:
+    if stringify:
+      body.withTree PrefixX, n.info:
+        body.addIdent "$"
+        tr(n, body)
+    else:
+      tr(n, body)
+  let lam = makeLambdaTyped(n.info, @[], @[], retType, body)
+  b.withTree CallX, n.info:
+    b.addIdent "watchValue"
+    b.addTree lam
+
 proc emitCall(n: var NifCursor; b: var NifBuilder) =
   var fn = firstChild(n)
   var args = fn
@@ -763,7 +782,8 @@ proc emitCall(n: var NifCursor; b: var NifBuilder) =
 
   # Explicit state API: keep the receiver as is, rewrite the other arguments.
   if fnName == "get" or fnName == "set" or fnName == "update" or
-     fnName == "peek" or fnName == "stateValue":
+     fnName == "peek" or fnName == "stateValue" or
+     fnName == "subscriberCount" or fnName == "signalId":
     b.openTree(n.tagId, n.info)
     b.takeTree fn
     var a = args
@@ -810,7 +830,23 @@ proc emitCall(n: var NifCursor; b: var NifBuilder) =
   var idx = 0
   while a.hasMore:
     if idx == valuePos and reactive:
-      emitReactiveValue(a, b)
+      if isStateArg(a):
+        b.takeTree a
+      elif fnName == "addStyle":
+        emitLazyValue(a, b, "string")
+      elif fnName == "addClass":
+        var retType = "string"
+        if nargs == 3:
+          retType = "bool"
+        emitLazyValue(a, b, retType)
+      elif fnName == "Text":
+        emitLazyValue(a, b, "string", stringify = true)
+      elif fnName == "setAttr" or fnName == "attr":
+        emitLazyValue(a, b, "string", stringify = true)
+      elif fnName == "setBoolAttr" or fnName == "boolAttr":
+        emitLazyValue(a, b, "bool")
+      else:
+        emitReactiveValue(a, b)
     else:
       var passBare = false
       var k = 0

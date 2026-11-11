@@ -4,6 +4,18 @@
 ## (`core`, `dsl`, `component`) be compiled and tested on the C backend, with
 ## no Node and no browser.
 
+proc debugLog*(s: string) =
+  discard
+
+proc captureStackBase*() =
+  discard
+
+proc memoryInfo*(): string =
+  result = ""
+
+proc stackInfo*(): string =
+  result = ""
+
 type
   NodeKind* = enum
     nkElement, nkText, nkComment

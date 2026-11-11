@@ -23,3 +23,5 @@ run js_smoke js_harness.js
 run js_async js_async_harness.js
 run js_aresource js_aresource_harness.js
 run js_plugin js_plugin_harness.js
+run js_teardown js_teardown_harness.js
+run js_lazy js_lazy_harness.js

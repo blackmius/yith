@@ -19,12 +19,16 @@ type
 
   Signal* = ref object
     head*: Sub
+    when defined(yithDebugSignals):
+      id*: int
 
   Sub* = ref object
     sig*: Signal
     prev*, next*: Sub
     scope*: Scope
     dead*: bool
+    when defined(yithDebugSignals):
+      id*: int
 
   Scope* = ref object
     parent*: Scope
@@ -40,12 +44,67 @@ type
     scheduled*: bool
     keepChildren*: bool
     buildOnce*: bool
+    when defined(yithDebugSignals):
+      id*: int
 
   State*[T] = ref object
     sig*: Signal
     value*: T
 
 var current*: Scope = nil
+
+when defined(yithDebugSignals):
+  var debugLogEnabled* = true
+  var debugFocusSigs*: seq[int] = @[]
+  var nextScopeId = 0
+  var nextSubId = 0
+  var nextSignalId = 0
+  var debugRing*: seq[string] = @[]
+
+  proc dlog(s: string) =
+    if debugLogEnabled:
+      debugLog("[yith] " & s)
+      debugRing.add s
+      if debugRing.len > 800:
+        debugRing.delete 0
+
+  proc clearDebugLog*() =
+    debugRing.setLen 0
+
+  proc dumpDebugLog*() =
+    ## Print the ring buffer. Call `NIF.dumpLog()` from the browser console
+    ## after a crash and send the output.
+    debugLog("--- yith debug log (" & $debugRing.len & " lines) ---")
+    var i = 0
+    while i < debugRing.len:
+      debugLog(debugRing[i])
+      inc i
+
+  proc sigFocused(id: int): bool =
+    result = false
+    if debugFocusSigs.len == 0:
+      return true
+    var i = 0
+    while i < debugFocusSigs.len:
+      if debugFocusSigs[i] == id:
+        return true
+      inc i
+else:
+  var debugLogEnabled* = false
+  var debugFocusSigs*: seq[int] = @[]
+
+  template dlog(s: string) =
+    discard
+
+  proc clearDebugLog*() =
+    discard
+
+  proc dumpDebugLog*() =
+    discard
+
+  proc signalId*[T](s: State[T]): int =
+    result = 0
+
 var currentCtx*: CtxLink = nil
 var tracking = false
 var pending: seq[Scope]
@@ -55,6 +114,10 @@ var deferFlush = 0
 
 proc unlink(sub: Sub) =
   if sub.dead: return
+  when defined(yithDebugSignals):
+    if sub.sig != nil and sigFocused(sub.sig.id):
+      dlog("unlink sub " & $sub.id & " sig " & $sub.sig.id & " scope " &
+           $(if sub.scope != nil: sub.scope.id else: -1))
   sub.dead = true
   if sub.prev != nil:
     sub.prev.next = sub.next
@@ -62,8 +125,17 @@ proc unlink(sub: Sub) =
     sub.sig.head = sub.next
   if sub.next != nil:
     sub.next.prev = sub.prev
+  # Sever every strong edge the dead Sub still holds, so destroying it cannot
+  # decrement neighbours the signal list no longer owns.
+  sub.prev = nil
+  sub.next = nil
+  sub.scope = nil
 
 proc link(sig: Signal; sub: Sub) =
+  when defined(yithDebugSignals):
+    if sigFocused(sig.id):
+      dlog("link sub " & $sub.id & " sig " & $sig.id & " scope " &
+           $(if sub.scope != nil: sub.scope.id else: -1))
   sub.next = sig.head
   if sig.head != nil:
     sig.head.prev = sub
@@ -75,6 +147,10 @@ proc subscriberCount*[T](s: State[T]): int =
   while it != nil:
     if not it.dead: inc result
     it = it.next
+
+when defined(yithDebugSignals):
+  proc signalId*[T](s: State[T]): int =
+    result = s.sig.id
 
 template state*() {.pragma.}
   ## Marks a declaration (or parameter) as reactive. A pre-sem pass lowers the
@@ -90,11 +166,22 @@ proc state*[T](v: T): T =
 proc newState*[T](v: T): State[T] =
   ## The real reactive constructor. Runtime modules use this explicitly; the
   ## state plugin emits it for `{.state.}` declarations.
-  result = State[T](sig: Signal(), value: v)
+  when defined(yithDebugSignals):
+    result = State[T](sig: Signal(id: nextSignalId), value: v)
+    inc nextSignalId
+    if sigFocused(result.sig.id):
+      dlog("state sig " & $result.sig.id)
+  else:
+    result = State[T](sig: Signal(), value: v)
 
 proc get*[T](s: State[T]): T =
   if tracking and current != nil and not current.dead:
-    let sub = Sub(sig: s.sig, scope: current)
+    var sub: Sub
+    when defined(yithDebugSignals):
+      sub = Sub(sig: s.sig, scope: current, id: nextSubId)
+      inc nextSubId
+    else:
+      sub = Sub(sig: s.sig, scope: current)
     current.subs.add sub
     link(s.sig, sub)
   result = s.value
@@ -104,7 +191,14 @@ proc stateValue*[T](s: State[T]): T =
   result = s.value
 
 proc newScope*(run: proc () {.closure.}): Scope =
-  result = Scope(run: run)
+  when defined(yithDebugSignals):
+    result = Scope(run: run, id: nextScopeId)
+    inc nextScopeId
+    if debugFocusSigs.len == 0:
+      dlog("scope new " & $result.id & " parent " &
+           $(if current != nil: current.id else: -1))
+  else:
+    result = Scope(run: run)
   if current != nil:
     result.parent = current
     result.domParent = current.domParent
@@ -127,6 +221,13 @@ proc runScope*(sc: Scope) =
 
 proc effect*(run: proc () {.closure.}): Scope =
   result = newScope(run)
+  # `effect` is usually discarded. Keep a counted owner tied to the parent so
+  # discarding the returned Scope can never free a scope that is still stored
+  # in `parent.children`. The cleanup is cleared with the parent.
+  if current != nil:
+    let keepAlive = result
+    current.cleanups.add proc () {.closure.} =
+      discard keepAlive
   runScope(result)
 
 type
@@ -155,6 +256,14 @@ template withoutTracking*(body: untyped): untyped =
     tracking = previousTracking
     produced
 
+template withoutTrackingStmt*(body: untyped) =
+  ## Statement form of `withoutTracking` for void calls.
+  block:
+    let previousTracking = tracking
+    tracking = false
+    body
+    tracking = previousTracking
+
 template computedExpr*(expr: untyped): untyped =
   ## Wrap a read expression into a cached state. The initial value must not
   ## subscribe the enclosing (build-once) component; only the effect owns the
@@ -165,6 +274,16 @@ template computedExpr*(expr: untyped): untyped =
     discard effect(proc () {.closure.} =
       computedState.set(expr))
     computedState
+
+proc watchValue*[T](f: proc (): T {.closure.}): State[T] =
+  ## Named-proc form used by attribute/text lowering. Keeping the derived
+  ## State in this frame (rather than a caller-local `computedExpr`) prevents
+  ## closure conversion from hoisting it into the enclosing component env.
+  let initial = withoutTracking:
+    f()
+  result = newState(initial)
+  discard effect(proc () {.closure.} =
+    result.set(f()))
 
 proc appendNode*(n: Node) =
   ## Register a freshly created node with the current scope and attach it to
@@ -181,14 +300,19 @@ proc onCleanup*(f: proc () {.closure.}) =
   if current != nil:
     current.cleanups.add f
 
-proc killScope(sc: Scope) =
-  if sc.dead: return
-  sc.dead = true
+proc resetScope(sc: Scope) =
+  ## Release everything a scope owns but keep `run` so the scope can be run
+  ## again. Permanent teardown adds `run = nil` in `killScope`.
   for i in 0 ..< sc.cleanups.len:
     sc.cleanups[i]()
   sc.cleanups.setLen 0
   for i in 0 ..< sc.children.len:
-    killScope(sc.children[i])
+    let child = sc.children[i]
+    killScope(child)
+    # Break the parent/child ref cycle. A dead child may outlive the parent in
+    # `pending`; leaving `parent` set makes its later destruction decrement a
+    # freed parent (and can recurse through child scopes).
+    child.parent = nil
   sc.children.setLen 0
   for i in 0 ..< sc.subs.len:
     unlink(sc.subs[i])
@@ -196,6 +320,19 @@ proc killScope(sc: Scope) =
   for i in 0 ..< sc.nodes.len:
     remove(sc.nodes[i])
   sc.nodes.setLen 0
+
+proc killScope(sc: Scope) =
+  if sc.dead: return
+  when defined(yithDebugSignals):
+    if debugFocusSigs.len == 0:
+      dlog("kill scope " & $sc.id & " children " & $sc.children.len &
+           " subs " & $sc.subs.len)
+  sc.dead = true
+  resetScope(sc)
+  # The run closure usually captures the element/E it rendered, and E.scope
+  # points back at this scope. Dropping the closure breaks that cycle so the
+  # scope is not destroyed recursively through its own rendered values.
+  sc.run = nil
 
 proc dispose*(sc: Scope) =
   if sc == nil or sc.dead: return
@@ -207,6 +344,7 @@ proc dispose*(sc: Scope) =
         sc.parent.children.delete i
         break
       inc i
+    sc.parent = nil
 
 proc drain() =
   var i = 0
@@ -223,7 +361,7 @@ proc drain() =
           sc.cleanups[j]()
         sc.cleanups.setLen 0
       else:
-        killScope(sc)
+        resetScope(sc)
         sc.dead = false
       runScope(sc)
   pending.setLen 0
@@ -249,6 +387,9 @@ proc scheduleFlush() =
     scheduleMicrotask(flush)
 
 proc set*[T](s: State[T]; v: T) =
+  when defined(yithDebugSignals):
+    if sigFocused(s.sig.id):
+      dlog("set sig " & $s.sig.id)
   s.value = v
   var it = s.sig.head
   while it != nil:

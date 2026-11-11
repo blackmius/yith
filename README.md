@@ -221,9 +221,24 @@ python3 -m http.server 8000
 # http://localhost:8000/examples/ui/kanban.html
 ```
 
-Known JS issue: drop can fail during scope teardown (`DataView`/dealloc,
-`docs/nimony-issues.md` #27). The C/test DOM path (`tests/ui/run.sh`) is the
-fully working one.
+For signal/scope lifecycle debugging use the debug bundle:
+
+```sh
+YITH_DEBUG=1 examples/ui/build_kanban_js.sh
+```
+
+It starts with a `yith kanban ...` console marker and keeps the last 800
+`[yith] link/unlink/set` events. After reproducing a problem:
+
+```js
+NIF.dumpLog()       // print the ring buffer
+NIF.debugSignals()  // live subscriber counts per state
+```
+
+The browser backend declares DOM values as opaque `ptr` handles, so scope
+teardown never reference-counts a host object (`docs/nimony-issues.md` #27).
+The C/test DOM path (`tests/ui/run.sh`) stays deterministic and is the one the
+drag tests drive.
 
 ## Speculative rendering
 
@@ -251,11 +266,15 @@ for v in views:
 To build drag targets directly:
 
 ```nim
-let targets = speculativeTargets(states, render, "#item-1")
+let targets = speculativeTargets(states, render, "#item-1", liveRoot)
 ```
 
 The component's normal CSS decides where each item lands; the drag code only
-reads the measured boxes.
+reads the measured boxes. Pass the live root as `origin`: the hidden host sits
+off-screen in the browser, so raw `getBoundingClientRect` values are shifted by
+that offset. `origin` moves the targets into the same client coordinate frame
+as pointer events. The C/test DOM backend re-roots every measurement at `0,0`,
+so its targets already share a frame.
 
 ## Motion core
 

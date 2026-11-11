@@ -25,8 +25,10 @@
 <body>
   <div id="app"></div>
   <script type="module">
-    import './kanban.js';
-    NIF.start(NIF.__internExt(document.getElementById('app')));
+    // Cache-busting: this is a dev demo and the bundle is rebuilt often.
+    import('./kanban.js?v=' + Date.now()).then(() => {
+      NIF.start(NIF.__internExt(document.getElementById('app')));
+    });
   </script>
 </body>
 </html>
