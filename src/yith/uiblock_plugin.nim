@@ -998,6 +998,31 @@ proc transformNode(n: var NifCursor; b: var NifBuilder; uiCtx: bool) =
           b.takeTree n
         inc i
       b.closeTree()
+  elif n.tagText == "discard":
+    # Rebuild `discard expr` instead of copying it. Copying the node leaves a
+    # symbol use for a proc-typed parameter (`children()`) whose source
+    # position is not in the output buffer; nimsem then asserts in
+    # `cursorAt`. Emitting the callee as a fresh ident keeps the tree valid.
+    var tag = n.tagId
+    var info = n.info
+    var c = firstChild(n)
+    b.openTree(tag, info)
+    if c.kind == TagLit and (c.tagText == "call" or c.tagText == "cmd"):
+      var callTag = c.tagId
+      var callInfo = c.info
+      var h = firstChild(c)
+      b.openTree(callTag, callInfo)
+      if h.kind == Symbol or h.kind == Ident:
+        b.addIdent(nameOf(h))
+        skip h
+      while h.hasMore:
+        transformNode(h, b, uiCtx)
+      b.closeTree()
+      skip c
+    elif c.hasMore:
+      transformNode(c, b, uiCtx)
+    b.closeTree()
+    skip n
   elif n.tagText == "call" or n.tagText == "cmd":
     var tag = n.tagId
     var info = n.info

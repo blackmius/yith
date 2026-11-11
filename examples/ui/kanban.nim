@@ -33,15 +33,23 @@ var
   liveRoot: Node
   liveBoard: Node
   activeZone: DragZone[Board]
+  activeDragCtl: DragController[Board] = newDragController[Board]()
 
-proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
+proc startCardDrag*(board: State[Board];
                     dragTask: State[int]; dragTitle: State[string];
                     taskId: int; title: string; p: Point)
-proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
+proc startColumnDrag*(board: State[Board];
                       dragTask: State[int]; dragTitle: State[string];
                       columnId: string; p: Point)
 
-proc CardView*(board: State[Board]; dragCtl: DragController[Board];
+proc DragRenderer*(ctl: DragController[Board];
+                   children: proc (): E {.closure.}): E {.ui.} =
+  c.Div.drag_root:
+    onCreated(e):
+      activeDragCtl = ctl
+    discard children()
+
+proc CardView*(board: State[Board];
                dragTask: State[int]; dragTitle: State[string];
                taskId: int; title: string): E {.ui.} =
   c.Div.card:
@@ -52,20 +60,19 @@ proc CardView*(board: State[Board]; dragCtl: DragController[Board];
     css.display("flex")
     css.align_items("center")
     css.padding("0 8px")
-    cls.dragging(dragCtl.active.get() and dragTask.get() == taskId)
+    cls.dragging(activeDragCtl.active.get() and dragTask.get() == taskId)
     onPointerDown(e):
       if debugLogEnabled:
         debugLog("pointerdown card " & $taskId)
       dragStart.set(board.get())
       dragTask.set(taskId)
       dragTitle.set(title)
-      startCardDrag(dragCtl, board, dragTask, dragTitle, taskId, title,
+      startCardDrag(board, dragTask, dragTitle, taskId, title,
                     Point(x: e.clientX, y: e.clientY))
     c.Span.task_title:
       title
 
 proc ColumnView*(board: State[Board]; column: State[Column];
-                 dragCtl: DragController[Board];
                  dragTask: State[int]; dragTitle: State[string]): E {.ui.} =
   c.Div.col:
     attr.id("column-" & column.get().id)
@@ -78,8 +85,8 @@ proc ColumnView*(board: State[Board]; column: State[Column];
     css.flex_direction("column")
     css.gap("8px")
     css.padding("8px")
-    cls.drop(isDropColumn(dragCtl, dragTask.get(), column.get().id))
-    cls.dragging(dragCtl.active.get() and dragTask.get() == 0 and
+    cls.drop(isDropColumn(activeDragCtl, dragTask.get(), column.get().id))
+    cls.dragging(activeDragCtl.active.get() and dragTask.get() == 0 and
       dragTitle.get() == column.get().title)
     c.Div.col_head:
       attr.id("col-" & column.get().id)
@@ -93,14 +100,14 @@ proc ColumnView*(board: State[Board]; column: State[Column];
         dragStart.set(board.get())
         dragTask.set(0)
         dragTitle.set(column.get().title)
-        startColumnDrag(dragCtl, board, dragTask, dragTitle,
+        startColumnDrag(board, dragTask, dragTitle,
                         column.get().id, Point(x: e.clientX, y: e.clientY))
       c.Span.col_title:
         column.get().title
     for task in column.get().tasks:
-      CardView(board, dragCtl, dragTask, dragTitle, task.id, task.title)
+      CardView(board, dragTask, dragTitle, task.id, task.title)
 
-proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
+proc KanbanView*(board: State[Board];
                  dragTask: State[int]; dragTitle: State[string]): E {.ui.} =
   c.Div.board:
     css.display("flex")
@@ -108,12 +115,12 @@ proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
     css.gap("16px")
     css.padding("20px")
     onPointerMove(e):
-      if dragCtl.active.get() and activeZone != nil:
+      if activeDragCtl.active.get() and activeZone != nil:
         discard activeZone.move(Point(x: e.clientX, y: e.clientY))
     onPointerUp(e):
       if debugLogEnabled:
         debugLog("pointerup")
-      if dragCtl.active.get():
+      if activeDragCtl.active.get():
         dragTask.set(0)
         dragTitle.set("")
         if activeZone != nil:
@@ -122,24 +129,27 @@ proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
       hideOverlay()
     uiBlock(proc () {.closure.} =
       for column in board.get().columns:
-        ColumnView(board, newState(column), dragCtl, dragTask, dragTitle)
-      if dragCtl.active.get():
+        ColumnView(board, newState(column), dragTask, dragTitle)
+      if activeDragCtl.active.get():
         c.Div.ghost:
           attr.id("drag-ghost")
           css.position("fixed")
-          css.left($dragCtl.pointer.get().x & "px")
-          css.top($dragCtl.pointer.get().y & "px")
+          css.left($activeDragCtl.pointer.get().x & "px")
+          css.top($activeDragCtl.pointer.get().y & "px")
           c.Span.task_title:
             dragTitle.get())
 
 
 proc renderBoard(s: Board; model: State[Board];
-                 dragCtl: DragController[Board];
+                 ctl: DragController[Board];
                  dragTask: State[int]; dragTitle: State[string]): E =
+  let prev = activeDragCtl
+  activeDragCtl = ctl
   model.set(s)
-  result = KanbanView(model, dragCtl, dragTask, dragTitle)
+  result = KanbanView(model, dragTask, dragTitle)
+  activeDragCtl = prev
 
-proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
+proc startCardDrag*(board: State[Board];
                     dragTask: State[int]; dragTitle: State[string];
                     taskId: int; title: string; p: Point) =
   var tmp = newState(initialBoard())
@@ -154,11 +164,11 @@ proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
     proc (s: Board): string {.closure.} =
       "#task-" & $taskId,
     "#task-" & $taskId,
-    dragCtl, snap = 24.0, ghostSelector = "#drag-ghost")
+    activeDragCtl, snap = 24.0, ghostSelector = "#drag-ghost")
   activeZone = zone
   zone.start(p)
 
-proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
+proc startColumnDrag*(board: State[Board];
                       dragTask: State[int]; dragTitle: State[string];
                       columnId: string; p: Point) =
   let ci = columnIndex(board.get(), columnId)
@@ -176,7 +186,7 @@ proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
     proc (s: Board): string {.closure.} =
       "#col-" & columnId,
     "#column-" & columnId,
-    dragCtl, snap = 18.0, animSelector = ".col",
+    activeDragCtl, snap = 18.0, animSelector = ".col",
     hideDropContent = true, ghostSelector = "#drag-ghost")
   activeZone = zone
   zone.start(p)
@@ -185,6 +195,7 @@ proc beginKanban(parent: Node): Scope =
   liveRoot = parent
   board = newState(initialBoard())
   dragCtl = newDragController[Board]()
+  activeDragCtl = dragCtl
   dragStart = newState(board.get())
   dragTask = newState(0)
   dragTitle = newState("")
@@ -193,7 +204,8 @@ proc beginKanban(parent: Node): Scope =
                      signalId(dragCtl.active), signalId(dragCtl.target),
                      signalId(dragCtl.pointer)]
   result = beginRoot(parent)
-  discard KanbanView(board, dragCtl, dragTask, dragTitle)
+  discard DragRenderer(dragCtl, proc (): E {.closure.} =
+    result = KanbanView(board, dragTask, dragTitle))
   liveBoard = find(liveRoot, ".board")
 
 proc start(parent: Node) {.exportc: "start".} =
