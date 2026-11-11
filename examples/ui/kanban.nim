@@ -22,7 +22,7 @@ import yith/spec
 import yith/dom/api
 import ./kanban_model
 
-const kanbanBuild* = "cyclefix-4"
+const kanbanBuild* = "cyclefix-5"
 
 var
   board: State[Board]
@@ -46,7 +46,9 @@ proc CardView*(board: State[Board]; dragCtl: DragController[Board];
                taskId: int; title: string): E {.ui.} =
   c.Div.card:
     attr.id("task-" & $taskId)
+    css.box_sizing("border-box")
     css.height("64px")
+    css.flex_shrink("0")
     css.display("flex")
     css.align_items("center")
     css.padding("0 8px")
@@ -67,7 +69,11 @@ proc ColumnView*(board: State[Board]; column: State[Column];
                  dragTask: State[int]; dragTitle: State[string]): E {.ui.} =
   c.Div.col:
     attr.id("column-" & column.get().id)
+    css.box_sizing("border-box")
     css.width("220px")
+    css.flex("0 0 220px")
+    css.min_width("0")
+    css.overflow("hidden")
     css.display("flex")
     css.flex_direction("column")
     css.gap("8px")
@@ -78,6 +84,7 @@ proc ColumnView*(board: State[Board]; column: State[Column];
     c.Div.col_head:
       attr.id("col-" & column.get().id)
       css.height("32px")
+      css.flex_shrink("0")
       css.display("flex")
       css.align_items("center")
       onPointerDown(e):
@@ -118,6 +125,7 @@ proc KanbanView*(board: State[Board]; dragCtl: DragController[Board];
         ColumnView(board, newState(column), dragCtl, dragTask, dragTitle)
       if dragCtl.active.get():
         c.Div.ghost:
+          attr.id("drag-ghost")
           css.position("fixed")
           css.left($dragCtl.pointer.get().x & "px")
           css.top($dragCtl.pointer.get().y & "px")
@@ -146,7 +154,7 @@ proc startCardDrag*(dragCtl: DragController[Board]; board: State[Board];
     proc (s: Board): string {.closure.} =
       "#task-" & $taskId,
     "#task-" & $taskId,
-    dragCtl, snap = 24.0)
+    dragCtl, snap = 24.0, ghostSelector = "#drag-ghost")
   activeZone = zone
   zone.start(p)
 
@@ -168,7 +176,8 @@ proc startColumnDrag*(dragCtl: DragController[Board]; board: State[Board];
     proc (s: Board): string {.closure.} =
       "#col-" & columnId,
     "#column-" & columnId,
-    dragCtl, snap = 18.0)
+    dragCtl, snap = 18.0, animSelector = ".col",
+    hideDropContent = true, ghostSelector = "#drag-ghost")
   activeZone = zone
   zone.start(p)
 

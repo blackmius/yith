@@ -1361,14 +1361,27 @@ dispose(view)
 `layout.nim` is the FLIP layer:
 
 ```nim
-captureLayout(root, ".card, .col", token)
-# mutate the model / re-render
-playLayout(root, ".card, .col", token, 160)
+# inside flush, while a DragZone is armed:
+beginLayout()   # captureLayout(root, ".card, .col", token)
+drain()         # mutate the model / re-render
+endLayout()     # playLayout(root, ".card, .col", token, 160)
 ```
 
-It records the old border boxes of elements with ids, then sets a linear
-`transform` from the old to the new position. It is a no-op on the C/test
-backend. `overlay.nim` renders the measured targets and the line graph between
+It records the old border boxes (position and size) of elements with ids, then
+animates `transform` and `width`/`height` linearly to the new boxes, so columns
+grow/shrink smoothly when cards enter or leave. The hook lives in `flush`:
+while a `DragZone` is armed, `beginLayout` captures before the drain and
+`endLayout` plays after it, so any `state.set()` is animated without explicit
+calls at the mutation site. Animation cleanup saves and restores each element's
+original inline width/height/box-sizing, so view styles are never erased on
+reused nodes. `playDropLayout` additionally
+starts the grabbed element at the pointer with the ghost's size and scales it
+into its final box; `hideDropContent` hides its children during that stretch.
+Each `DragZone` chooses `animSelector`: card drags use `.card, .col`, column
+drags use `.col` plus `hideDropContent = true`, so a column reorder animates
+only the column box and never the cards inside it. It is a no-op on the C/test
+backend. `overlay.nim` renders
+the measured targets and the line graph between
 them as an SVG overlay (`setDragOverlay(true)`); it is debug-only and never
 affects layout.
 

@@ -81,10 +81,12 @@ type
     statesOf*: proc (s: S): seq[S] {.closure.}
     selector*: proc (s: S): string {.closure.}
     grabbedSelector*: string
+    ghostSelector*: string
     controller*: DragController[S]
     snap*: float
     startState*: S
     animSelector*: string
+    hideDropContent*: bool
     token*: string
     duration*: int
 
@@ -96,11 +98,15 @@ proc newDragZone*[S](model: State[S]; container: Node;
                      controller: DragController[S];
                      snap: float = 0.0;
                      animSelector = ".card, .col";
-                     duration = 160): DragZone[S] =
+                     duration = 160;
+                     ghostSelector = "";
+                     hideDropContent = false): DragZone[S] =
   result = DragZone[S](model: model, container: container, render: render,
                        statesOf: statesOf, selector: selector,
-                       grabbedSelector: grabbedSelector, controller: controller,
+                       grabbedSelector: grabbedSelector,
+                       ghostSelector: ghostSelector, controller: controller,
                        snap: snap, animSelector: animSelector,
+                       hideDropContent: hideDropContent,
                        token: "yith-drag", duration: duration)
 
 proc start*[S](z: DragZone[S]; p: Point) =
@@ -112,6 +118,8 @@ proc start*[S](z: DragZone[S]; p: Point) =
                                    z.container)
   z.controller.start(closest(targets).withSnap(z.snap).withFloating(), p)
   z.startState = s
+  disarmLayout()
+  armLayout(z.container, z.animSelector, z.token, z.duration)
   if dragOverlayEnabled:
     showOverlay(targets)
 
@@ -126,28 +134,29 @@ proc move*[S](z: DragZone[S]; p: Point): bool =
   result = z.controller.target.get() != prevTarget or
            z.controller.far.get() != prevFar
   if result:
-    if z.container != nil:
-      captureLayout(z.container, z.animSelector, z.token)
     z.model.set(z.controller.previewState(z.startState))
     flush()
-    if z.container != nil:
-      playLayout(z.container, z.animSelector, z.token, z.duration)
 
 proc drop*[S](z: DragZone[S]): S =
   ## Finish the drag and animate the grabbed element from the pointer to its
   ## new box; all other id'd elements FLIP from their old boxes.
-  let ghost = z.controller.pointer.get()
+  let pointer = z.controller.pointer.get()
+  var ghostW = 0.0
+  var ghostH = 0.0
+  if z.ghostSelector.len > 0 and z.container != nil:
+    let ghost = find(z.container, z.ghostSelector)
+    if ghost != nil:
+      let gr = bounds(ghost)
+      ghostW = gr.w
+      ghostH = gr.h
   var next = z.startState
   if z.controller.hasDrop():
     next = z.controller.chosen().state
-  if z.container != nil:
-    captureLayout(z.container, z.animSelector, z.token)
+  armDrop(z.grabbedSelector, pointer.x, pointer.y, ghostW, ghostH,
+          z.hideDropContent)
   discard z.controller.finish()
   z.model.set(next)
   flush()
-  if z.container != nil:
-    playDropLayout(z.container, z.animSelector, z.token, z.grabbedSelector,
-                   ghost.x, ghost.y, z.duration)
   result = next
 
 proc centerOf(r: Rect): Point =

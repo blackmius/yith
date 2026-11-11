@@ -10,6 +10,7 @@
 {.feature: "assumeSync".}
 
 import ./dom/api
+import ./layout
 
 type
   CtxLink* = ref object
@@ -377,6 +378,7 @@ proc drain() =
 proc flush*() =
   if flushing: return
   flushing = true
+  beginLayout()
   # A `set` performed while an effect runs queues another flush. In a real
   # event loop the scheduled microtask would pick it up, but the test backend
   # runs microtasks synchronously and would lose it while `flushing` is true.
@@ -384,6 +386,7 @@ proc flush*() =
   while flushQueued or pending.len > 0:
     flushQueued = false
     drain()
+  endLayout()
   flushing = false
 
 proc scheduleFlush() =

@@ -208,8 +208,14 @@ discard zone.drop()
 `zone.move` re-renders only when the chosen target changes and FLIP-animates
 the changed elements. `zone.drop` finishes the drag and animates the grabbed
 element from the pointer position (the ghost) to its final box; every other
-id'd element slides from its old box. The animation selector defaults to
-`.card, .col`, so column reorders animate too.
+id'd element slides from its old box.
+
+`animSelector` picks what participates: card drags use the default
+`.card, .col` (cards and column sizes animate); column drags pass `.col` so the
+column reorder is animated as one unit with no per-card motion. Passing
+`hideDropContent = true` additionally hides the grabbed element's children
+while its box stretches, so a dragged column stays static inside and only the
+column itself grows from the ghost to its final box.
 
 The zone measures the container's frame and renders every candidate inside a
 hidden host of the **same width/height**. This is what keeps speculative flex
@@ -246,19 +252,54 @@ nimony c -d:yithDomTest -p:src examples/ui/kanban.nim -o:bin/kanban && ./bin/kan
 ### Layout animation
 
 When the target state changes, the live board is re-rendered and the changed
-elements slide linearly from their old boxes to the new ones (FLIP):
+elements slide linearly from their old boxes to the new ones (FLIP). While a
+`DragZone` is armed, `flush` brackets the drain itself:
 
 ```nim
-captureLayout(boardNode, ".card, .col", "board")
-board.set(nextState)
-flush()
-playLayout(boardNode, ".card, .col", "board", 160)
+# inside flush:
+beginLayout()   # capture position + size of every id'd .card/.col
+drain()
+endLayout()     # compare with the new boxes, then animate the deltas
 ```
 
-`layout.nim` is a no-op on the C/test backend. `DragZone.move` calls it only
-when the drop target changes, not on every pointer pixel. `DragZone.drop` uses
-`playDropLayout`, which starts the grabbed element at the pointer/ghost center
-and FLIPs all the other id'd elements.
+So any `state.set()` that changes the DOM is animated automatically; there is
+no capture/play call at the mutation site. `zone.move`/`zone.drop` only choose
+which state to set.
+
+It records the old border boxes (position **and** width/height) of elements
+with ids, then animates linearly to the new boxes: `transform` for movement,
+`width`/`height` for size. That is what makes a column grow smoothly when a
+card is dragged into it, and shrink when one leaves. It is a no-op on the
+C/test backend. `DragZone.move` triggers it only when the drop target changes,
+not on every pointer pixel.
+
+Animation cleanup saves and restores the element's original inline styles, so
+`css.height`/`css.boxSizing` set by the view are never erased (a reused card
+keeps its `height:64px` after a drop).
+
+`DragZone.drop` uses `playDropLayout`: the grabbed element starts at the
+pointer with the **ghost's size** and expands (`scale`) into its final box,
+while all the other id'd elements FLIP and resize from their old boxes.
+`ghostSelector` tells the zone which element to measure for that starting
+size. With `hideDropContent`, the grabbed element's direct children are set to
+`visibility:hidden` for the duration of that stretch and restored afterwards,
+so dragging a whole column animates only the column box.
+
+The trigger is state-driven: while a `DragZone` is armed, `flush` itself calls
+`beginLayout`/`endLayout` around the drain, so **any** `state.set()` that
+changes the DOM is animated automatically. `zone.move`/`zone.drop` only decide
+which state to set; they do not capture or play anything themselves.
+
+To keep the board from jumping when content moves between columns, the example
+uses stable boxes:
+
+```nim
+.col:  box-sizing:border-box; width:220px; flex:0 0 220px;
+       min-width:0; overflow:hidden
+.card: box-sizing:border-box; height:64px; flex-shrink:0
+```
+
+Only the column's height changes (and animates); its width stays 220px.
 
 ### Debug overlay
 
