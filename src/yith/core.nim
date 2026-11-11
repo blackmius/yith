@@ -1,0 +1,330 @@
+## yith core: reactive state and scopes.
+##
+## A `Scope` is the unit of ownership and re-execution. It owns child scopes,
+## subscriptions, DOM nodes it created, and cleanup closures. `get()` records a
+## dependency on the currently running scope; `set()` marks the dependent
+## scopes dirty and schedules a flush. Disposing a scope walks its children, so
+## an entire subtree disappears in one chain.
+
+{.feature: "lenientnils".}
+{.feature: "assumeSync".}
+
+import ./dom/api
+
+type
+  CtxLink* = ref object
+    key*: int
+    prev*: CtxLink
+    val*: ref RootObj
+
+  Signal* = ref object
+    head*: Sub
+
+  Sub* = ref object
+    sig*: Signal
+    prev*, next*: Sub
+    scope*: Scope
+    dead*: bool
+
+  Scope* = ref object
+    parent*: Scope
+    children*: seq[Scope]
+    subs*: seq[Sub]
+    nodes*: seq[Node]
+    cleanups*: seq[proc () {.closure.}]
+    run*: proc () {.closure.}
+    domParent*: Node
+    domBefore*: Node
+    ctx*: CtxLink
+    dead*: bool
+    scheduled*: bool
+    keepChildren*: bool
+    buildOnce*: bool
+
+  State*[T] = ref object
+    sig*: Signal
+    value*: T
+
+var current*: Scope = nil
+var currentCtx*: CtxLink = nil
+var tracking = false
+var pending: seq[Scope]
+var flushQueued = false
+var flushing = false
+var deferFlush = 0
+
+proc unlink(sub: Sub) =
+  if sub.dead: return
+  sub.dead = true
+  if sub.prev != nil:
+    sub.prev.next = sub.next
+  else:
+    sub.sig.head = sub.next
+  if sub.next != nil:
+    sub.next.prev = sub.prev
+
+proc link(sig: Signal; sub: Sub) =
+  sub.next = sig.head
+  if sig.head != nil:
+    sig.head.prev = sub
+  sig.head = sub
+
+proc subscriberCount*[T](s: State[T]): int =
+  result = 0
+  var it = s.sig.head
+  while it != nil:
+    if not it.dead: inc result
+    it = it.next
+
+proc state*[T](v: T): State[T] =
+  result = State[T](sig: Signal(), value: v)
+
+proc signal*[T](v: T): State[T] =
+  ## Alias used by the design examples.
+  result = state(v)
+
+proc get*[T](s: State[T]): T =
+  if tracking and current != nil and not current.dead:
+    let sub = Sub(sig: s.sig, scope: current)
+    current.subs.add sub
+    link(s.sig, sub)
+  result = s.value
+
+proc stateValue*[T](s: State[T]): T =
+  ## Read without subscribing.
+  result = s.value
+
+proc newScope*(run: proc () {.closure.}): Scope =
+  result = Scope(run: run)
+  if current != nil:
+    result.parent = current
+    result.domParent = current.domParent
+    result.domBefore = current.domBefore
+    result.ctx = currentCtx
+    current.children.add result
+
+proc runScope*(sc: Scope) =
+  let prev = current
+  let prevTracking = tracking
+  let prevCtx = currentCtx
+  current = sc
+  currentCtx = sc.ctx
+  tracking = not sc.buildOnce
+  if sc.run != nil:
+    sc.run()
+  tracking = prevTracking
+  currentCtx = prevCtx
+  current = prev
+
+proc effect*(run: proc () {.closure.}): Scope =
+  result = newScope(run)
+  runScope(result)
+
+type
+  Computed*[T] = ref object
+    ## A cached derived value. The effect owns the dependency edges; `get`
+    ## subscribes the caller to the underlying state.
+    state*: State[T]
+    scope*: Scope
+
+proc computed*[T](f: proc (): T {.closure.}): Computed[T] =
+  result = Computed[T](state: state(f()))
+  result.scope = effect(proc () {.closure.} =
+    result.state.set(f()))
+
+proc get*[T](c: Computed[T]): T =
+  c.state.get()
+
+proc peek*[T](c: Computed[T]): T =
+  stateValue(c.state)
+
+template withoutTracking*(body: untyped): untyped =
+  block:
+    let previousTracking = tracking
+    tracking = false
+    let produced = body
+    tracking = previousTracking
+    produced
+
+template computedExpr*(expr: untyped): untyped =
+  ## Wrap a read expression into a cached state. The initial value must not
+  ## subscribe the enclosing (build-once) component; only the effect owns the
+  ## dependency edges.
+  block:
+    let computedState = withoutTracking:
+      state(expr)
+    discard effect(proc () {.closure.} =
+      computedState.set(expr))
+    computedState
+
+proc appendNode*(n: Node) =
+  ## Register a freshly created node with the current scope and attach it to
+  ## the current DOM parent. The scope owns the node: its removal on re-run or
+  ## disposal is what makes a subtree vanish without a diff.
+  if current != nil:
+    current.nodes.add n
+    if current.domBefore != nil:
+      insertBefore(current.domParent, n, current.domBefore)
+    elif current.domParent != nil:
+      appendChild(current.domParent, n)
+
+proc onCleanup*(f: proc () {.closure.}) =
+  if current != nil:
+    current.cleanups.add f
+
+proc killScope(sc: Scope) =
+  if sc.dead: return
+  sc.dead = true
+  for i in 0 ..< sc.cleanups.len:
+    sc.cleanups[i]()
+  sc.cleanups.setLen 0
+  for i in 0 ..< sc.children.len:
+    killScope(sc.children[i])
+  sc.children.setLen 0
+  for i in 0 ..< sc.subs.len:
+    unlink(sc.subs[i])
+  sc.subs.setLen 0
+  for i in 0 ..< sc.nodes.len:
+    remove(sc.nodes[i])
+  sc.nodes.setLen 0
+
+proc dispose*(sc: Scope) =
+  if sc == nil or sc.dead: return
+  killScope(sc)
+  if sc.parent != nil:
+    var i = 0
+    while i < sc.parent.children.len:
+      if sc.parent.children[i] == sc:
+        sc.parent.children.delete i
+        break
+      inc i
+
+proc drain() =
+  var i = 0
+  while i < pending.len:
+    let sc = pending[i]
+    inc i
+    if not sc.dead:
+      sc.scheduled = false
+      if sc.keepChildren:
+        for j in 0 ..< sc.subs.len:
+          unlink(sc.subs[j])
+        sc.subs.setLen 0
+        for j in 0 ..< sc.cleanups.len:
+          sc.cleanups[j]()
+        sc.cleanups.setLen 0
+      else:
+        killScope(sc)
+        sc.dead = false
+      runScope(sc)
+  pending.setLen 0
+
+proc flush*() =
+  if flushing: return
+  flushing = true
+  # A `set` performed while an effect runs queues another flush. In a real
+  # event loop the scheduled microtask would pick it up, but the test backend
+  # runs microtasks synchronously and would lose it while `flushing` is true.
+  # Drain until no work remains.
+  while flushQueued or pending.len > 0:
+    flushQueued = false
+    drain()
+  flushing = false
+
+proc scheduleFlush() =
+  if deferFlush > 0:
+    flushQueued = true
+    return
+  if not flushQueued:
+    flushQueued = true
+    scheduleMicrotask(flush)
+
+proc set*[T](s: State[T]; v: T) =
+  s.value = v
+  var it = s.sig.head
+  while it != nil:
+    let nxt = it.next
+    if not it.dead and not it.scope.dead and not it.scope.scheduled:
+      it.scope.scheduled = true
+      pending.add it.scope
+    it = nxt
+  scheduleFlush()
+
+proc update*[T](s: State[T]; f: proc (v: var T) {.closure.}) =
+  var v = s.value
+  f(v)
+  s.set v
+
+# Assignment operators on signals are type-driven: `s += v` wraps the
+# mutation in `update`. Nimony's generic arithmetic is not available yet
+# (issue #12), so the concrete instantiations are listed explicitly.
+proc `+=`*(s: State[int]; v: int) =
+  s.update(proc (x: var int) {.closure.} = x += v)
+
+proc `-=`*(s: State[int]; v: int) =
+  s.update(proc (x: var int) {.closure.} = x -= v)
+
+proc `*=`*(s: State[int]; v: int) =
+  s.update(proc (x: var int) {.closure.} = x *= v)
+
+proc `/=`*(s: State[int]; v: int) =
+  s.update(proc (x: var int) {.closure.} = x = x div v)
+
+proc `+=`*(s: State[float]; v: float) =
+  s.update(proc (x: var float) {.closure.} = x += v)
+
+proc `-=`*(s: State[float]; v: float) =
+  s.update(proc (x: var float) {.closure.} = x -= v)
+
+proc `*=`*(s: State[float]; v: float) =
+  s.update(proc (x: var float) {.closure.} = x *= v)
+
+proc `/=`*(s: State[float]; v: float) =
+  s.update(proc (x: var float) {.closure.} = x /= v)
+
+proc `+=`*(s: State[string]; v: string) =
+  s.update(proc (x: var string) {.closure.} = x = x & v)
+
+proc `&=`*(s: State[string]; v: string) =
+  s.update(proc (x: var string) {.closure.} = x = x & v)
+
+proc batch*(body: proc () {.closure.}) =
+  inc deferFlush
+  body()
+  dec deferFlush
+  if deferFlush == 0 and flushQueued:
+    scheduleMicrotask(flush)
+
+var rootStack: seq[Scope]
+
+proc beginRoot*(parent: Node): Scope =
+  ## Start a render root attached to `parent`. Tests and the app bootstrap use
+  ## this; disposing the returned scope removes everything rendered under it.
+  rootStack.add current
+  result = newScope(nil)
+  result.domParent = parent
+  current = result
+
+proc endRoot*() =
+  flush()
+  if rootStack.len > 0:
+    current = rootStack[rootStack.high]
+    rootStack.setLen rootStack.len - 1
+  else:
+    current = nil
+
+proc currentScope*(): Scope =
+  result = current
+
+proc hasPending*(): bool =
+  result = pending.len > 0
+
+proc withScope*(sc: Scope; body: proc () {.closure.}) =
+  ## Run `body` as if it were a step of `sc`: `get()` subscribes `sc`.
+  let prevCurrent = current
+  let prevTracking = tracking
+  current = sc
+  tracking = true
+  body()
+  tracking = prevTracking
+  current = prevCurrent

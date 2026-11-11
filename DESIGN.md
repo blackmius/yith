@@ -1,0 +1,1910 @@
+# yith — design
+
+Target reactivity model and DSL. Current implementation status is in
+[`README.md`](README.md); this file describes where we are heading and which
+rules must not change along the way.
+
+## 1. Principles
+
+1. **Build once.** The DOM is created once; after that reactivity changes a
+   specific text node, attribute, branch, or list element. There is no virtual
+   DOM.
+2. **Everything is signals.** `Signal[T]`, `Computed[T]`, `effect` are the only
+   source of changes. DOM, context, async and lists are consumers of the graph.
+3. **Standard Nim.** Components are ordinary procedures, bodies are ordinary
+   code. Sugar (`if`, `for`, attrs, slots) is stripped by a compile-time layer;
+   every piece of sugar has a runtime equivalent when the plugin is off.
+4. **Explicit ownership.** `Scope` owns effects, DOM nodes, subscriptions,
+   signals, context and coroutines. Deleting a scope deletes the whole subtree,
+   without traversing signals.
+5. **Precision.** Subscription and update happen at the leaf level: text,
+   attribute, condition, list element. Reading a signal "somewhere in the body"
+   subscribes the nearest scope and re-renders it entirely — this is a
+   deliberate fallback.
+
+## 2. Execution model
+
+```
+Signal[T] ──► Computed[U] ──► Binding (text/attr/if/for) ──► DOM
+    ▲               ▲
+    └──── effect ───┘            onCleanup, async, context
+```
+
+- **Source** — `Signal[T]`: a value and a list of subscribers.
+- **Derived** — `Computed[T]`: a lazy/memoized computation depending on other
+  nodes; notifies only when the value changes.
+- **Effect** — a block of code with dependencies, restart, and cleanup.
+- **Binding** — a special case of effect with a single DOM target (node,
+  attribute, branch, list element).
+- **Scope** — an ownership node. The scope tree mirrors the structure of
+  components, branches, and list elements.
+
+### 2.1 Phases
+
+1. **Build** — the component/element creates DOM and scope and runs its body.
+2. **Bind** — expressions in reactive positions become `Computed`/
+   binding; subscriptions are recorded.
+3. **Update** — `set` marks dependencies, flush recomputes computed and
+   restarts effects; the DOM changes pointwise.
+4. **Dispose** — subscriptions are removed, cleanups are called, nodes are
+   deleted, coroutines are cancelled, signals are released.
+
+### 2.2 Tracking
+
+`.get()` subscribes the **current computation** (effect/computed/binding) if
+one is running. Outside a computation (event handler, imperative code)
+`.get()` subscribes nothing. For an explicit read without subscription — `.peek()`.
+
+The rule is the same for sync and async code: when a coroutine resumes, the
+runtime restores its scope/computation, so a `.get()` after `await`
+subscribes exactly the effect in which the `await` occurred.
+
+## 3. Signals
+
+Terminology: `Signal[T]` is the general term for a reactive handle; the
+concrete types are chosen by `signal(v)`:
+
+- `Cell[T]` — a primitive/explicit cell;
+- `ObjState[T]` — an object with `FieldRef` fields;
+- `SeqState[T]` — a sequence with `FieldRef` elements;
+- `TableState[K,V]`, `SetState[T]` — collections.
+
+`cell(v)` is always `Cell[T]`. In the current code the source is called
+`State[T]`/`state`; renaming with aliases will happen as implementation
+proceeds.
+
+### 3.1 `Signal[T]`
+
+`signal(v)` is deep by default for composite values: an object/seq/
+Table/Set gets a store and proxy types (§3.7). For a primitive it is
+`Cell[T]`. `cell(v)` is an explicit low-level cell for any `T`.
+
+```nim
+let count = signal(0)       # Cell[int]
+count.get()                 # reads and subscribes the current computation
+count.set(1)                # no-op if the value is equal (==)
+count.setAlways(1)          # forced notification
+count.update proc (v: var int) =
+  v += 1                    # copy → mutate → set (comparison inside)
+count.peek()                # without subscription
+```
+
+- `set` compares values (`==` by default) and notifies only on change. For
+  types without `==` — `signal(v, eq = ...)` or `setAlways`.
+- A signal is a `let`: the reference does not change, the value does. `var s:
+  Signal[T]` is not needed.
+- `s.set(...)`/`s.update(...)` is the canonical form. `s = v` is rewritten by
+  the `{.ui.}` macro pragma into `s.set(v)` for local signals and parameters;
+  `s += v`/`-=`/`*=`/`/=`/`&=` and `s.foo(args)` are lifted by the macro into
+  `var yithV = s.get(); yithV op ...; s.set(yithV)`, so any `proc mut(x: var T)`
+  works. This is sugar, not reassigning the reference.
+  For global signals the macro cannot see the type: `s = v` is an explicit
+  `.set`, `+=`/`-=` are concrete overloads on `State[int/float/string]`.
+- `update` is an operation over a `Cell`/`Store` snapshot: it copies, applies
+  the `var` procedure, then calls `set`. For a deep `signal`, the ordinary
+  operations are available (`push`, `s.field = v`) — see §3.7.
+- `get()` returns a snapshot (Nim value semantics); for large structures —
+  `List`/an explicit store or proxy access (§3.6–§3.7).
+- This describes `Cell[T]`. `signal(obj/seq)` uses the deep model: each
+  field/element has its own signal, and bindings of different fields do not
+  recompute each other (§3.7).
+
+### 3.2 Objects and nested data
+
+`signal(obj)` is deep: each field/element has its own signal, and the code
+is written as ordinary object manipulation.
+
+```nim
+type
+  Todo = object
+    id: int
+    title: string
+    done: bool
+  Board = object
+    todos: seq[Todo]
+    counter: int
+
+let board = signal(Board(todos: @[], counter: 0))
+
+board.counter += 1                  # -> update of the counter field
+board.todos.push(Todo(id: 1, title: "design", done: false))
+board.todos[0].done = true          # -> update of the element
+Text(board.counter)                 # binding on the field
+Text(board.todos[0].title)          # binding on the element's field
+```
+
+- `board.get()` — a `Board` snapshot; `board.set(v)`/`board = v` — a diff.
+- Changing `counter` does not recompute the bindings of `todos[...]`;
+  per-field/per-item signals give pointwise edges.
+- `board.todos` — `SeqState[Todo]`; `board.todos[0]` — `TodoRef`;
+  `TodoRef.done` — `FieldRef[bool]`; all of it looks like ordinary fields.
+- `update` remains for snapshots and batch changes:
+  `board.update proc (v: var Board) = v.counter += 1`.
+
+For types where proxies are not generated (generic/imported/recursive) —
+`cell` or an explicit `Store`/`List` (§3.6, §3.7).
+
+### 3.3 `Computed[T]`
+
+```nim
+let doneCount = computed(proc (): int =
+  var n = 0
+  for t in board.get().todos:
+    if t.done: inc n
+  n)
+
+let visible = computed(proc (): seq[Todo] =
+  board.get().todos.filter(proc (t: Todo): bool = not t.done))
+```
+
+- `Computed` recomputes on read after invalidation; if bindings/effects are
+  subscribed to it, the runtime recomputes it during flush and notifies
+  subscribers only when the value changes (`eq`).
+- Dependencies are rebuilt on every recomputation (dynamic tracking): if a
+  branch stops reading a signal, the edge disappears.
+- `computed:` is sugar for `computed(proc(): T = body)`.
+- A single computation can be reused in several places: one subscriber, as
+  many DOM updates as there are bindings.
+- Common cases are shorter:
+  ```nim
+  todos.len                       # Computed[int] for Signal[seq[T]]/List[T]
+  let done = todos.derive(proc (xs: seq[Todo]): int =
+    xs.filter(proc (t: Todo): bool = t.done).len)
+  ```
+  `derive` is `computed` with a value argument; on `Signal[T]`:
+  `board.derive(proc (b: Board): int = b.counter)`.
+
+### 3.4 `effect` and `onCleanup`
+
+```nim
+effect:
+  let id = board.get().counter
+  Text("counter " & $id)
+  onCleanup:
+    echo "restart or dispose"
+```
+
+- The body runs immediately; then on any dependency change.
+- Before a restart and on dispose all `onCleanup` handlers run (LIFO).
+- `effect` creates a scope; scopes/DOM/subscriptions created inside it die
+  with it.
+- Nested effects are children of the current scope.
+
+### 3.5 Lifecycle: build once
+
+The component body runs **once** per instance. During execution tracking is
+off: a `.get()` in the body reads the value and does **not** subscribe the
+component. Reactive reads live in bindings (`Text`, attributes),
+`if`/`for` (their conditions/sources are computed) and explicit
+`effect`/`computed`.
+
+```nim
+proc Row(card: Signal[Card]): E {.ui.} =
+  Text(card.get().title)       # binding: only the text is updated
+
+proc Counter(): E {.ui.} =
+  let n = signal(0)            # created once
+  let doubled = computed(proc (): int = n.get() * 2)
+  c.Button:
+    onClick(e):
+      n.update(proc (v: var int) = v += 1)
+    Text($doubled.get())
+```
+
+- `signal`/`computed` in the body are created once and live with the instance.
+- `set` does not restart the component body; only the binding/computed
+  that read the signal is recomputed.
+- The instance dies when its owner **structurally** replaces it: an
+  `if` branch change, a key change in `for`, `Dynamic(page)`, parent dispose.
+  Its signals, effects and DOM go with it.
+- State that must survive a branch/page change is lifted higher (parent,
+  context, module) or lives in a keep-alive container.
+- Props: a plain value is a snapshot; for a reactive prop, `Signal[T]`/
+  `Computed[T]` is passed and read in a binding. The plugin may wrap the
+  expression at the call site in `computed`.
+
+```nim
+# this won't work: x is a snapshot, it won't update
+proc Bad(): E =
+  let card = getCard()
+  let x = card.get().title
+  Text(x)
+```
+
+The auto-wrapper `proc ...: E` is a boundary: it disables tracking for the
+duration of the body, so a read in the body will not subscribe even an outer
+`effect`. Bindings inside enable tracking for themselves.
+
+### 3.6 Collections: `List`, `Set`, `Table`
+
+`Signal[seq[T]]` is the simple case: any `set` notifies the whole thing. For
+collections with keys there are three stores with a common contract:
+
+- **structure** (the set of keys/order) and **content** (the value by key)
+  are notified separately;
+- `for` rebuilds the DOM only on structural changes; a value is
+  updated via a per-key `Signal`;
+- common operations: `len: Computed[int]`, `has(key): bool`, `clear`;
+- keys are stable and unique; changing a key = delete + create.
+
+#### 3.6.1 `List[T]` — order and keys
+
+```nim
+let todos = list(@[
+  Todo(id: 1, title: "design", done: false),
+  Todo(id: 2, title: "build", done: true),
+], key = proc (t: Todo): int = t.id)
+
+todos.len                 # Computed[int]
+todos.get(1)              # Signal[Todo] (by key)
+todos.has(2)              # bool, reads the structure
+todos.add(Todo(id: 3, ...))
+todos.remove(2)
+todos.move(0, 2)
+todos.updateAt(1, proc (t: var Todo) = t.done = true)
+```
+
+- Order is insertion order; `move` changes only that.
+- `get(key)` requires an existing key; for an optional one —
+  `tryGet(key) -> Option[Signal[T]]`.
+- `add/remove/move` change the structure: `for` creates/moves/deletes DOM.
+- `updateAt` changes only `Signal[Todo]`: the row updates, the structure does not.
+- `signal(seq[T])` returns `SeqState[T]` (the same keyed store).
+  `cell(seq[T])`/raw `Signal[seq]` work too: `ForEach` maintains the
+  table of keys and item signals itself. `List`/`SeqState` are needed when
+  structural operations are performed imperatively.
+
+#### 3.6.2 `Set[T]` — membership
+
+```nim
+let tags = setOf(@[
+  Tag(id: 1, name: "ui"),
+  Tag(id: 2, name: "perf"),
+], key = proc (t: Tag): int = t.id)
+
+tags.len
+tags.has(1)               # bool
+tags.get(1)               # Signal[Tag]
+tags.add(Tag(id: 3, name: "docs"))
+tags.remove(2)
+tags.updateAt(1, proc (t: var Tag) = t.name = "ui-kit")
+
+for t in tags:
+  Text(t.get().name)
+```
+
+- A set with a key; for primitives the key is the value itself
+  (`setOf(@[1, 2, 3])`).
+- Order is insertion order so that rendering is deterministic.
+  Even if order is not needed, we still keep it in `Set`.
+- `add` with an existing key is an upsert: the structure does not change,
+  `Signal[T]` is updated; `remove` is a structural operation.
+- `for t in tags` yields `t: Signal[T]`; the key is internal, `key` is not written.
+- `has` reads the structural signal and is reactive inside a binding.
+
+#### 3.6.3 `Table[K, V]` — key → value
+
+```nim
+let config = table[string, int](@[("retries", 3), ("timeout", 30)])
+
+config.len
+config.has("retries")     # bool
+config.get("retries")     # Signal[int]
+config.tryGet("missing")  # Option[Signal[int]]
+config.set("backoff", 5)  # new key — structural change
+config.updateAt("retries", proc (v: var int) = v += 1)
+config.delete("timeout")
+config.keys               # seq[K] in insertion order
+config.values             # seq[V]
+
+for k, v in config:
+  Text(k & " = " & $v.get())
+```
+
+- `K` is hashable/equatable; `V` is any value with `==`.
+- `set` with an existing key updates `Signal[V]`, the structure does not change;
+  a new key is an insertion.
+- `delete` is a structural operation; `updateAt` is value-only.
+- `for k, v in config` yields `k: K` (a static key) and `v: Signal[V]`;
+  `key` is not written — the table key is the identity.
+- Iteration order is insertion order.
+
+#### 3.6.4 Common
+
+- Constructors: `list(items, key)`, `setOf(items, key = identity)`,
+  `table[K, V](pairs)`. `Set`/`Table` may conflict with
+  `system.set`/`std/tables.Table`; when importing — qualify or
+  use aliases (`YSet`, `YTable`).
+- `len` is `Computed[int]`; `has` is a `bool` reading the structure; `keys` is
+  a snapshot in insertion order.
+- All mutations can be grouped in `batch:` — one flush, one structural
+  diff.
+- `cell(seq[T])`/`cell(Table)` — snapshots and simple cases; `signal(seq)`/
+  `signal(Table)` — deep stores.
+
+### 3.7 Deep `signal`: proxies and rewriting
+
+For a composite `T`, `signal(v)` is turned by the compiler into a store + proxy
+types; the syntax remains ordinary Nim.
+
+```nim
+let todos = signal(@[
+  Todo(id: 1, title: "Buy milk", done: false),
+], key = proc (t: Todo): int = t.id)
+
+todos.push(Todo(id: 2, title: "Walk dog", done: false))
+todos[0].done = true
+Text(todos[0].title)
+Text("total " & $todos.len)
+```
+
+#### How it works
+
+- `signal(seq[T])` → `SeqState[T]` (keyed store, §3.6) + `TRef` for the element.
+  Without `key` the key is the index (stable for append/remove at the end); for
+  reorder/insertions set `key = proc (t: T): K = ...`.
+- `TRef` is a ref object; each field is a `FieldRef[F]` (`get/set` via the
+  item signal and `updateAt`); nested objects/seqs get nested
+  `ObjState`/`SeqState`.
+- `signal(obj)` → `ObjState[T]` with a `FieldRef` per field; `signal(Table)` →
+  `TableState`; `signal(Set)` → `SetState`.
+- `signal(primitive)` → `Cell[T]`: deepness is not needed.
+- `cell(v)` is an explicit `Cell[T]` for generic/imported/recursive types where
+  a proxy cannot be generated.
+
+#### Access rules
+
+| code | meaning |
+|---|---|
+| `todos[0].done` in a value | `get()` of the field |
+| `todos[0].done = true` | `set(true)` of the field |
+| `todos[0] = newTodo` | `updateAt(0, ...)` |
+| `todos.push/add/remove/move` | structural operation of the store |
+| `todos.len/has` | store API + `get()` |
+| `todos.get()` / `todos.set(v)` | snapshot / diff |
+| `for t in todos` | proxies/signals (§5.3) |
+
+- `let t = todos[0]` is a proxy, not a copy; `t.done = true` changes the store.
+  `let d = todos[0].done` is a `bool` snapshot; for a reactive field keep the
+  proxy (`let t = todos[0]`) or a `computed`.
+- Passing to `proc (t: Todo)` — `toValue` (snapshot); mutations of the parameter
+  do not affect the store (Nim value semantics).
+- Dynamic access by runtime name/key — store API only; there is no runtime
+  Proxy/reflection in Nimony.
+- `todos = newSeq` is sugar for `set(newSeq)`; field/element — for
+  `update`.
+
+#### Boundaries
+
+- Proxy types are generated for a specific `T`; generic/imported/
+  recursive/cyclic types — via `cell`/`Store`.
+- Depth — fields, elements, nested seq/Table/Set; very deep graphs are
+  better folded into a store.
+- Cost: N `FieldRef`/item signals and a diff on `set`; for small objects
+  `Cell` is cheaper and more predictable.
+- Compiler layer: the `signal(v)` macro generates the store/proxy; `get/set`
+  sugar — pre-sem (§7). If a proxy field is not a `FieldRef`, a type plugin
+  can intercept access.
+
+### 3.8 Depth, recursion, and generator limits
+
+Syntax depth is unlimited: `a.q.x`, `a[0][0][0].q.x`,
+`node.children[0].x` are just chains of store/`FieldRef`. The limit is the
+type generator, not the runtime.
+
+#### Type mapping
+
+| `T` | `Proxy[T]` |
+|---|---|
+| primitive | `FieldRef[T]` / `Cell[T]` |
+| object | `TRef` (fields — `FieldRef` or nested stores) |
+| `seq[U]` | `SeqState[U]`; `[]` returns `Proxy[U]` |
+| `Table[K,V]` | `TableState[K,V]` |
+| `Set[U]` | `SetState[U]` |
+| `Option[U]` | `FieldRef[Option[U]]` — leaf, we do not go inside `Some` |
+| `ref`/`ptr` | `RefField[T]`; deep tracing stops |
+| tuple/array/variant/distinct | according to support, or fallback |
+
+`Proxy[T]` is memoized: one generated type per `T`. Recursive
+types via `seq`/`ref` produce finite ref types:
+`NodeRef.children: SeqState[Node]` and `SeqState[Node][]: NodeRef`.
+Runtime cycles from `ref` are not expanded infinitely: the boundary is a `ref`
+field (identity/snapshot).
+
+Verified manually (`tests/ui/tdeep.nim`): `object→object→field`, three
+levels of `seq`, and a recursive `Node (Node → seq[Node] → Node)` —
+compile and update. Compiler sugar (`a.q.x = 10`) is work for the
+generator, not the runtime.
+
+#### Generator policy
+
+- Budget: a maximum of generated proxy types and a maximum depth (for example,
+  64 types / 16 levels; configurable). On exceeding it — a compile-time
+  error suggesting `cell`/an explicit `Store`.
+- Generic `T`: only monomorphized instances; otherwise `cell`.
+- Imported types: if the fields are visible to the generator; otherwise `cell`/`Store`.
+- Variant objects: fields of all branches, or a fallback.
+- `ref`/`ptr`: deep tracking does not go through a reference; the field is a `RefField`
+  (get/set of a snapshot/reference).
+- Compile time, binary size and memory — measure; choose the cap by
+  benchmark.
+
+#### Snapshot consistency
+
+- Field stores are the source of truth; `get()` is a computed snapshot reading
+  nested stores. Updating a leaf invalidates the parent snapshot but
+  does not recompute bindings that do not read it.
+- `set(T)` diffs nested stores (or replaces their values).
+
+#### Verification matrix
+
+| case | expectation |
+|---|---|
+| `A.q.x` | works |
+| `seq[seq[seq[A]]][0][0][0].q.x` | works |
+| object → seq → object → seq → … | works as long as the type is finite |
+| recursive `Node` with `children: seq[Node]` | works via recursive ref types |
+| `ref` cycle | stops at `ref`/identity |
+| generic `T` | fallback if not monomorphized |
+| imported fields | if visible to the generator |
+
+#### Depth benchmark
+
+Generate types `A0…A16`, nested `seq` of depth 1…8, a recursive
+`Node`; measure compile time, binary size, leaf update latency
+and memory; pick the default cap by the knee.
+
+### 3.9 `Option[T]`
+
+We use `std/options`: `Option[T]` — `Some(T)`/`None`, structural
+equality; `none[T]()` requires `HasDefault` (works for value objects;
+for ref/non-default — a value object or `cell`).
+
+```nim
+let user: Signal[Option[User]] = signal(none[User]())
+user.set(some(User(name: "Ann")))
+
+if user.get().isSome:
+  Text(user.get().get().name)
+```
+
+- A signal can hold an Option; `set` compares structurally, `some/none`
+  notify as usual.
+- `Option` is a **leaf** for a deep signal: a field/element is `FieldRef[
+  Option[T]]`; inside `Some` deep tracing does not go (None may be
+  absent). For fields — `get()`/`map`/`orElse`.
+- There is no optional chaining. Instead of `user.data.name`:
+  ```nim
+  data.get().get().name
+  # or
+  data.map(proc (u: User): string = u.name).get("")
+  ```
+- `Option` branches: `if data.get().isSome:` → `uiWhen`; or `Match`
+  (planned: `Some(u): ... / None: ...`).
+- Helpers: `map/flatMap/filter/get(default)/orElse`; in a binding they yield
+  a `Computed`, and `Option` equality cuts off redundant writes.
+
+### 3.10 `Resource[T]` — sum of states
+
+`Resource` is not three fields `data/state/error`, but a single sum value:
+
+```nim
+type
+  ResourceState* = enum resLoading, resReady, resError
+
+  ResourceValue*[T] = object
+    case kind*: ResourceState
+    of resLoading:
+      discard
+    of resReady:
+      data*: Signal[T]
+    of resError:
+      error*: Signal[ErrorInfo]
+
+  Resource*[T] = ref object
+    value*: Signal[ResourceValue[T]]
+    # private: fetcher, generation, refresh, arg
+```
+
+- `Loading` carries no data; `Ready` — data; `Error` — an error.
+- `data`/`error` are signals **inside** the branches. `mutate` updates Ready data
+  without changing `kind`, so the branch is not recreated; changing `kind`
+  recreates the branch.
+- `case user:` expands into `uiCase` (see §5.2.1); payloads
+  arrive as `Computed`/`Signal`.
+- `Option` is no longer needed for the Resource state; Option remains for
+  arbitrary optional data (§3.9).
+
+API:
+
+```nim
+proc resource*[T](fetcher: proc (): T {.passive.}): Resource[T]
+proc resource*[T, A](fetcher: proc (a: A): T {.passive.};
+                     arg: A): Resource[T, A]
+proc refetch*[T](r: Resource[T])
+proc refetch*[T, A](r: Resource[T, A]; arg: A)
+proc mutate*[T](r: Resource[T]; v: T)
+proc mutate*[T](r: Resource[T]; f: proc (v: var T))
+```
+
+The implementation with an argument is called `ArgResource[T, A]`: Nimony does
+not support two generic types with the same name and different arity (issue
+#26), so `Resource[T]` and `Resource[T, A]` do not compile in one module. The
+constructor syntax is preserved:
+
+```nim
+let user = resource(proc (id: int): User {.passive.} =
+  fetch("/api/users/" & $id), userId)
+refetch(user, nextId)
+```
+
+Example:
+
+```nim
+let userId = signal(0)
+
+let user = resource(proc (): User {.passive.} =
+  fetch("/api/users/" & $userId.get()).awaitJson(User))
+
+case user:
+of Loading:
+  Spinner()
+of Error(error):
+  ErrorComponent(error)      # error: Computed[ErrorInfo]
+of Ready(data):
+  UserCard(data)             # data: Computed[User]
+
+user.mutate(User(name: "Optimistic"))
+user.refetch()
+```
+
+Semantics:
+
+- `resource` starts a passive effect in the current scope. The sources are
+  everything the fetcher read via `.get()` (`userId`), plus `refresh`/`arg`.
+- Transitions: `Loading → Ready/Error`; `refetch` → `Loading` (the Ready branch
+  is deleted) → Ready/Error; `mutate` → Ready.
+- On start — a generation; a late response is applied only if it is
+  current (source change/refetch/dispose). Races are cut off.
+- `mutate(v)`: if Ready — update the data signal; otherwise assemble Ready with
+  a new data signal. `mutate(f)` — Ready only; otherwise a no-op.
+- `refetch(arg)` for `Resource[T, A]`: arg is a signal; the fetcher receives it;
+  source signals are tracked anyway.
+- fetch/parse errors are caught as `ErrorCode` and put into the `Error` branch
+  (`Signal[ErrorInfo]`).
+- The owner is the creating scope; dispose cancels the effect and ignores late
+  responses. Passing `Resource` to children is a handle; `mutate/refetch` are available.
+- `isLoading`/`isError` are optional derived helpers; the main
+  way is `case`.
+
+**Current implementation.** `ResourceValue[T]` contains only `kind`, while
+`data: State[T]` and `error: State[ErrorInfo]` live on `Resource[T]` and are
+created on the first transition into the corresponding kind. The reason is
+that the JS backend loses `State[T]` placed inside a variant object
+after a passive effect restart (issue #24). The external semantics are the
+same: `mutate` updates `data` without changing `kind`, `Loading → Ready/Error`
+recreates the branch, late responses are cut off by generation.
+## 4. DOM and elements
+
+### 4.1 `E`, `Node`, fragments, and levels
+
+- `E` is a handle to a rendered fragment: nodes + scope.
+- A fragment is bounded by anchors (comments); a keyed list moves the range
+  as a whole.
+- `Text(s)` creates a text node.
+- The auto-wrapper for `proc ...: E` creates the component's build-once scope,
+  fragment anchors, and returns `E`.
+
+Levels:
+
+```
+E / Node
+ └─ ElE(tag, children)             runtime: node + children, low level
+    └─ c.Tag.class: children       the only user-facing syntax
+       └─ proc …: E {.ui.}         components
+```
+
+- User tags are written only through `c.Tag.class:`; tag and class names are
+  arbitrary, the tag list is not fixed.
+- `c` is not a runtime object and not a `Props` record: the `{.ui.}` macro
+  pragma parses the untyped AST and emits `ElE`/`addClass`/`attr`/`addStyle`/
+  `setProp`/`on`.
+- `ElE`/`El`/`Text` are low-level runtime primitives for the library,
+  templates, and JS tests; application code uses `c`.
+- User components are ordinary `proc …: E {.ui.}` with typed parameters; a
+  component is called as `Card(...)`.
+
+### 4.2 Attributes, classes, styles, and properties
+
+Inside a `c` block, operators go on separate lines and combine freely:
+
+| form | semantics |
+|---|---|
+| `c.Div.cls1.cls2:` | classes `cls1 cls2` |
+| `cls(name)` | dynamic class from `State[string]`/`string` |
+| `cls.active(cond)` | class `active` when `cond` is true |
+| `attr.data_id("x")` | attribute `data-id="x"` |
+| `attr.disabled(true)` | bool attribute: `true` presence, `false` remove |
+| `css.background_color("#eee")` | inline style |
+| `css.font_size(10, "px")` | `font-size: 10px` |
+| `prop.value(name)` | DOM property |
+| `onClick(e): body` | event |
+| `onMount(e: El): body` | hook after creation |
+| `onCleanup(): body` | hook on dispose |
+
+Names:
+
+| written | result |
+|---|---|
+| `cls1`, `btn_default` | `cls1`, `btn-default` |
+| `MyElement` (tag) | `my-element` |
+| `data_id`, `aria_label` | `data-id`, `aria-label` |
+| `background_color`, `backgroundColor` | `background-color` |
+
+- Chains: `attr.disabled(true).aria_label("Click")`,
+  `css.display("flex").gap("8px")`, `prop.title("x").tabIndex(3)`.
+- Values are dispatched by `setAttr`/`addStyle`/`setProp` overloads:
+  `string`, numbers, `bool`, `State[T]`, `Computed[T]`.
+- An expression with `.get()` is evaluated once; a binding appears when a
+  signal/computed sits in the value position.
+
+Children — only via block/indentation:
+
+```nim
+c.Div.card:
+  attr.data_id("c1")
+  css.display("flex").gap("8px")
+  c.Span.title:
+    item.title
+  c.Span.muted:
+    item.subtitle
+  c.Button.btn:
+    onClick(e):
+      open.set(true)
+    "Open"
+```
+
+- `(...)` — only operator arguments; the element is opened with `:`.
+- children — by indentation; a single text/expression — after `:`.
+- no `Div(..., Span(..., Text(...))))`.
+
+### 4.3 Text
+
+`Text(expr)` creates a text node and a binding. In a `c` block a bare
+string/numeric literal or expression becomes text automatically:
+
+```nim
+c.Span.title:
+  item.title
+c.Div.empty:
+  "Nothing here"
+```
+
+`Text(...)` remains the explicit runtime form.
+
+### 4.4 Events and lifecycle
+
+- `Event`: `stopPropagation`, `preventDefault`, `target`, `currentTarget`,
+  `clientX/clientY`, `pointerId`, `key`, ...
+- `onClick(e): ...`, `onInput(e): ...`; several handlers are
+  composed.
+- `onMount(e: El)`/`onCreated(e)` — after the node is attached; once per
+  build; post-order (children before the parent).
+- `onCleanup()` — on scope dispose, not when a node is moved.
+- `.get()` inside handlers does not subscribe the computation.
+- `onCreated` is the only imperative hook. `also`/`Mod`/`modify` are not
+  part of the API.
+- After-the-fact mutation of `E` (`e.attr`, `e.addClass`) is static and not
+  reactive; for reactivity use `Signal`/`Computed` in the value.
+
+### 4.5 Handles and DOM operations
+
+`E` (and `Node`) expose a minimal set:
+
+```nim
+E:
+  node: Node
+  attr(name, value)
+  addClass(name)
+  setStyle(prop, value)
+  on(event, handler)
+  onCreated(handler)
+  onCleanup(handler)
+  appendChild(child)
+  rect(): Rect
+  capture(pointerId)
+  release(pointerId)
+  focus()
+  scrollIntoView()
+```
+
+`onCreated` receives `E`; `e.currentTarget` in an event is the `E` of the
+element the handler is attached to. After-the-fact calls are static; reactive
+updates go through bindings.
+
+## 5. DSL
+
+### 5.1 Component
+
+```nim
+proc Card(title: string; children: proc (): E): E {.ui.} =
+  c.Div.card:
+    Text(title)
+    children()
+```
+
+- Any `proc ...: E` is a component. The compiler **itself** wraps the body:
+  creates a fragment (two anchors), a build-once scope, makes the fragment the
+  current parent, and executes the body. All top-level `c`/`Text`/components
+  are appended to the fragment immediately; the fragment's `E` is returned
+  outward.
+- Neither `component:` nor `fragment:` is written in the source.
+- `signal/computed` inside are created once; the body is not restarted on
+  updates (see §3.5).
+- `children` is a reserved name for the direct contents of a call
+  (`Card(): c.Div: ...; c.Div: ...`), see §5.5.
+- `onCreated`/`onCleanup` at the component level belong to its scope.
+- A component returns `E`; it can be mounted, put into `seq[E]`,
+  used as a dynamic page, or called as `proc(): E`.
+- `return`/`result` are not used in a component body: the result is always
+  the fragment. Early exit — via `if`/`slot`.
+- All `proc ...: E` are considered components. If you need a function that
+  returns an already-built `E` without creating a fragment, make it a
+  `template` or a separate wrapper type.
+
+### 5.1.1 The `c` combinator (frameorc-style)
+
+The only syntax for native tags is a single identifier `c`, a chain
+through the dot and an indentation block. The tag does not have to be in the
+list of known ones:
+
+```nim
+proc View(count: State[int]): E {.ui.} =
+  c.Div.cls1.cls2:
+    c.Button.btn_default:
+      attr.disabled(true).aria_label("Click")
+      css.background_color("#eee").padding("4px").font_size(10, "px")
+      prop.title("hello").tabIndex(3)
+      onClick(e):
+        count += 1
+      onMount(e: El):
+        echo "mounted"
+      onCleanup():
+        echo "cleanup"
+      "Click me"
+    c.MyElement:
+      "custom"
+```
+
+Rules:
+
+- a segment starting with an uppercase letter is a tag (`Div` → `div`,
+  `MyElement` → `my-element`); the last such segment wins;
+- a segment starting with a lowercase letter is a class (`cls1`, `btn_default`
+  → `btn-default`); several classes are joined with a space;
+- `attr.name(value)`/`attr.name.value(value)` — attributes; `data_*`/
+  `aria_*` and underscores turn into dashes; the chain
+  `attr.disabled(true).aria_label("Click")` sets both attributes;
+- `css.name(value)` — inline style; names are converted to kebab-case,
+  several arguments are joined (`font_size(10, "px")` → `10px`);
+- `prop.name(value)` — DOM property, the name is unchanged; the chain
+  `prop.title("hello").tabIndex(3)` sets both properties;
+- `onClick(e): body`, `onInput(e): body` — event; the parameter gets the type
+  `Event`; `onMount(e: El)`/`onCreated` → `onCreated`, `onCleanup()` →
+  element cleanup;
+- `on.click(handler)` — the frameorc form of an event;
+- bare strings/values — `Text(...)`, a nested `c.Tag` — a child.
+
+The named-attrs syntax `Div(class = "x"):` is removed: `c` is the only
+user-facing syntax, the tag list is not fixed, `Props` records are not
+needed.
+
+### 5.2 `if`
+
+```nim
+if board.get().todos.len == 0:
+  Text("empty")
+elif loading.get():
+  Spinner()
+else:
+  List()
+```
+
+In a component/element body, an `if` with a reactive condition compiles to
+`uiWhen`:
+
+```nim
+uiWhen(computed(proc (): bool = board.get().todos.len == 0),
+       proc () = Text("empty"),
+       proc () =
+         uiWhen(computed(proc (): bool = loading.get()),
+                proc () = Spinner(),
+                proc () = List()))
+```
+
+- The condition is `Computed[bool]`; the branches are scopes.
+- A branch is built once per activation; inside it only bindings are
+  updated. Changing the condition = dispose the old branch (cleanup + DOM) and
+  build the new one.
+- State declared in a branch lives with the branch; to preserve it, hoist it
+  into the component or use `Show` (hide, not remove).
+- A static condition (no signals) remains an ordinary `if` without a scope.
+
+### 5.2.1 Reactive `case` and sum types
+
+A `case` over a `Resource`/variant signal is `uiCase`/`uiSwitch`, not an
+ordinary Nim `case`:
+
+```nim
+case user:
+of Loading:
+  Spinner()
+of Error(error):
+  ErrorComponent(error)
+of Ready(data):
+  UserCard(data)
+```
+
+- The `Loading/Ready/Error` branches are sugar for `resLoading/resReady/resError`.
+- The selector is `kind`/enum; when the branch changes, the old branch is
+  disposed and the new one built.
+- The payload is bound as `Computed[T]`/`Signal[T]`; inside Ready,
+  `data.get()`.
+- Inside a single branch (`Ready`), updating `data` does not recreate the
+  branch: only bindings that read `data` are updated.
+- `else` — fallback; a static `case` over an ordinary value remains a
+  Nim `case`.
+- A `case` expression (a value) is not transformed; statement only.
+- `break`/`continue`/`return` inside a branch are forbidden (a branch is a
+  closure/scope), as for `if`/`for`.
+
+Generic variant:
+
+```nim
+type Shape = object
+  case kind: ShapeKind
+  of circle: r: float
+  of rect: w, h: float
+
+let shape = signal(Shape(kind: circle, r: 2))
+
+case shape:
+of circle(r):
+  Text("r=" & $r)
+of rect(w, h):
+  Text("w=" & $w & " h=" & $h)
+```
+
+Lowering:
+
+```nim
+uiCase(computed(proc (): ResourceState = user.value.get().kind),
+  of Loading: proc () = Spinner(),
+  of Error:   proc (error: Computed[ErrorInfo]) = ErrorComponent(error),
+  of Ready:   proc (data: Computed[User]) = UserCard(data))
+```
+
+A branch is a build-once scope; payloads are computed slices of the source
+signal; a `kind` change is dispose/build, a payload change is bindings only.
+
+`case` sugar is **pre-sem**: `case user:`/`case shape:` over a handle/signal
+otherwise does not type-check (case requires an ordinal selector). A post-sem
+type plugin will not fix this anymore; the canonical form is `case
+user.value.get().kind:` with payloads via `get()`.
+
+### 5.3 `for`, `key`, and collections
+
+`for` is sugar; the form depends on the source.
+
+**Deep store (`SeqState`/`List`)** — the key is already in the store:
+
+```nim
+let todos = signal(@[
+  Todo(id: 1, title: "Buy milk", done: false),
+], key = proc (t: Todo): int = t.id)
+
+for t in todos:
+  Text(t.title)            # t: TodoRef, t.title: FieldRef[string]
+```
+
+- `t` is a `TRef` proxy; fields are `FieldRef`; `Text`/attr sugar reads them.
+- `key` is not written: the store holds the key; duplicates/key change is a
+  dev error/row recreation.
+- `for i, t in todos` — `i: Signal[int]`.
+- For a `seq` of primitives the element is a `FieldRef`/`Signal` of the
+  corresponding type.
+
+**Raw `seq` / `Signal[seq]` / `Computed[seq]`** — the key is mandatory:
+
+```nim
+let todos: Signal[seq[Todo]] = ...
+
+for i, t in todos:
+  key t.get().id
+  Text(t.get().title)
+```
+
+- `t: Signal[Todo]`; `key` — as the first line of the body.
+- For a static `seq`, `key` is optional (identity by index).
+
+**Set:**
+
+```nim
+for tag in tags:
+  Text(tag.name)           # tag: TagRef/FieldRef
+```
+
+- `tag` is a proxy/`Signal[T]`; `key` is not written — identity is set by the
+  set key.
+
+**Table:**
+
+```nim
+for k, v in config:
+  Text(k & " = " & $v)     # v: FieldRef/ValueRef
+```
+
+- `k: K` is a static key, `v` is `FieldRef[V]`/`Signal[V]`; `key` is not
+  written.
+
+General rules:
+
+- The body is a render closure that is called **per element**, not a Nim loop.
+  The closures capture the parameter (`t`/`tag`/`v`), not the loop variable.
+- `break`/`continue`/`return` inside such a `for` are forbidden: the body is a
+  closure.
+- Render runs once per key; content updates go through
+  per-key/field signals, not through a repeated render call.
+
+Update semantics:
+
+1. Key/order/length changed — `ForEach` creates, moves, and deletes DOM
+   ranges; existing rows are not recreated.
+2. Content changed with the same key — the per-key/field signal is updated;
+   only what reads it is redrawn.
+3. A row reads `todos.get()` (the whole store) — a subscription to everything,
+   knowingly more expensive; `t.title`/`t.get()` — only to the field/element.
+
+Runtime forms (low level):
+
+```nim
+forEachList(todos,
+  same = proc (a, b: Todo): bool = a.id == b.id,
+  key = proc (t: Todo): string = $t.id,
+  render = proc (t: Todo): E = Row(t))
+
+forEachSet(tags, render = proc (t: Signal[Tag]): E = Text(t.get().name))
+
+forEachTable(config, render = proc (k: string; v: Signal[int]): E =
+  Text(k & " = " & $v.get()))
+```
+
+The deep store gives a render proxy (`TRef`); the low-level forms use
+`Signal`.
+
+### 5.4 Expressions and computed lifting
+
+- In a value position (text, attr, `if`, `for key`) an expression is wrapped
+  in `Computed`; the binding subscribes to it and updates only its own
+  target.
+- Canonical code uses `.get()` explicitly:
+  `Text("todo: " & $todo.get().title)`, `if todos.get()[0].done:`.
+  Writing `todos[0].done` without `.get()` is possible only as compiler
+  sugar; we do not use it in portable code.
+- The compiler may insert `.get()` for a "bare" signal/`FieldRef` in a
+  value position (`variant = state1` → `state1.get()`,
+  `todos[0].done` → `get()`) and `.set()`/`.update()` for assignment
+  (`open = false`, `todos[0].done = true`, `count += 1`); this is sugar, not
+  a mandatory rule. For deep `signal` see §3.7.
+- Ordinary code between DSL calls (`var x = 10 * a`) runs at
+  build time; if it contains `.get()`, the nearest scope subscribes and is
+  redrawn as a whole. For precision — `computed`/`effect`.
+
+### 5.5 Components with slots
+
+Slots are ordinary proc parameters. The reserved name **`children`**
+receives all call contents that are not written as `slot name:`.
+
+```nim
+type
+  Slot0 = proc (): E
+  Slot1 = proc (arg: int): E
+
+proc Card(header: Slot0; action: Slot1; children: Slot0): E {.ui.} =
+  onCreated(e):
+    e.classes = "hello"
+  header()
+  action(10)
+  children()
+```
+
+A call without `slot`:
+
+```nim
+Card():
+  c.Div:
+  c.Div:
+```
+
+lowers to:
+
+```nim
+Card(children = proc (): E =
+  c.Div:
+  c.Div:)
+```
+
+A mixed call:
+
+```nim
+Card():
+  slot header:
+    Text("header")
+  slot action(n):
+    Text("action " & $n)
+  Text("main")
+  Text("main 2")
+```
+
+→
+
+```nim
+Card(
+  header = proc (): E = Text("header"),
+  action = proc (n: int): E = Text("action " & $n),
+  children = proc (): E =
+    Text("main")
+    Text("main 2"))
+```
+
+Rules:
+
+- `children` is a reserved name; the component parameter is
+  `children: proc (): E` (no arguments).
+- Everything at the top level of the block that is not `slot name:` goes into
+  `children` in the original order.
+- `slot name:` is collected into a named argument; the name must match a
+  component parameter.
+- `slot children:` is allowed and merges with the direct contents in the
+  original order (equivalent to the direct contents).
+- If a component does not declare `children` but the call has direct
+  contents — compile-time error.
+- If a component declares `children` but there are no contents, an
+  empty `proc (): E` is passed, so the component signature does not require
+  a mandatory argument.
+- Two `slot`s with the same name — error.
+- Each slot is an ordinary `proc(): E`/`proc(arg): E`, so it is also a
+  component: the body is wrapped into a fragment; a slot call creates a new
+  scope/DOM.
+- DOM order is determined by slot calls in the component body, not by the
+  order in the call.
+- Native elements are written via `c`; components use `children`
+  by default if the signature declares it.
+
+### 5.6 Context
+
+```nim
+type ChartData = object
+  rows: seq[Row]
+
+let ChartCtx = context[ChartData]()
+
+# low-level template: El is a runtime primitive, not the user-facing DSL
+template Chart(data: ChartData; body: untyped) =
+  El("svg"):
+    provide(ChartCtx, data):
+      body
+
+template Grid() =
+  let chart = use(ChartCtx)
+  El("g"): discard
+
+Chart(radar360):
+  Grid()
+  Line("peer", ...)
+```
+
+- `provide` is a dynamic extent for the duration of rendering.
+- Every scope created inside remembers the context chain; restarting a
+  scope/branch/list restores it.
+- `use` without a provider is an error (`panic`).
+- Async resumption restores the context together with the scope.
+
+### 5.7 Dynamic components
+
+```nim
+let page = signal(proc (): E = Page1)
+
+c.Div:
+  Dynamic(page)
+  c.Button:
+    onClick(e):
+      page.set(Page2)
+    Text("next")
+```
+
+- `Dynamic(page)` creates a child scope, subscribes to `page.get()`,
+  calls the component; on change — dispose the old one, render the new one.
+- `page` is `Signal[proc (): E]`; parameters are passed via a closure:
+  `proc (): E = Page2(id)`.
+- The sugar `page()` (a signal call) can be done by a plugin; canonically —
+  `Dynamic(page)`.
+
+### 5.8 State lifting and props
+
+A signal is passed into a component as an ordinary parameter. This is not a
+copy: the child receives the same handle and can read and change the owner's
+state.
+
+```nim
+proc Dialog(open: Signal[bool]): E {.ui.} =
+  if open:                     # -> open.get()
+    Card():
+      c.Button:
+        onClick(e):
+          open = false         # -> open.set(false)
+        Text("Close")
+
+proc App(): E {.ui.} =
+  let open = signal(false)
+  Dialog(open)
+  c.Button:
+    onClick(e):
+      open = true              # -> open.set(true)
+    Text("Open")
+```
+
+Without sugar, the same component:
+
+```nim
+proc Dialog(open: Signal[bool]): E {.ui.} =
+  if open.get():
+    Card():
+      c.Button:
+        onClick(e):
+          open.set(false)
+        Text("Close")
+```
+
+Rules:
+
+- The signal **owner** is whoever created it (`App`). The child does not own
+  the signal, does not dispose it and does not recreate it; `.set/.update`
+  changes the value for all subscribers.
+- In the child's body, reading `open` in `if`/attr/text is `open.get()` inside
+  a binding/computed; the component body is not restarted.
+- Writing `open = false`/`open += 1` is sugar for `set`/`update`; it also works
+  for a `let` signal (the reference does not change). The sugar is applied
+  **before sem**: `let open` + `open = ...` is otherwise a type/let error that
+  a post-sem plugin will not fix. Without a pre-sem layer use explicit `.set`.
+- `Computed[T]` is a read-only prop: `.get()` is allowed, `.set`/assignment is
+  a compile-time error. A read-only view of a signal is `readonly(s): Computed[T]`.
+- A composite prop can be passed as `State[T]`/`SeqState[T]`: the child
+  writes `todos.push(...)`, `todos[0].done = true`; this is the same store, not
+  a copy.
+- `Resource[T]` is a handle sum (`Loading/Ready/Error`): the child does
+  `case user:` and reads the payloads; `mutate/refetch` are available; the owner
+  and scope belong to the creator.
+- Native tags (`Div`, `Img`, `Input`, `Video`, …) do not take
+  `Props` records: their attributes are typed by value (`string`,
+  `int`, `bool`, `Signal[T]`), and `data-*`/`aria-*` are open. `Props`
+  are justified only for user components.
+- A user component with arbitrary attributes takes
+  `attrs: AttrList`; typed props remain ordinary `proc` parameters.
+- After-the-fact `Component().cls3` is not supported: `E` is a fragment, not
+  necessarily a single element. A component takes `class`/`attrs`/`children`
+  explicitly.
+- An ordinary `T` is a snapshot: changes will not arrive until the parent
+  recreates the component or passes a signal.
+- `List`/`Set`/`Table` are handles too: the child can `add/remove/updateAt`,
+  the structure is updated in all `for`s.
+- Callbacks (`onClose: proc()`) are a one-way alternative; a signal is two-way.
+  For controlled components (Dialog) a signal is more convenient; for "event
+  outward" — a callback.
+- **State lifting:** if several components need the state, create a
+  signal in their common ancestor and pass it down. For a deep tree — the same
+  signal in `provide`/`use` (§5.6), so you do not thread it through every
+  layer.
+- Forms: `c.Input: prop.value(name); onInput(e): name = e.value` —
+  manual wiring; `bind(name)` — sugar that sets value/checked and
+  updates the signal on input.
+- If the state must survive closing the dialog, `if open:` is done
+  **inside** `Dialog` (as above): the Dialog body is build-once, the Card
+  branch is removed/created. With `if open: Dialog()` outside, the Dialog is
+  destroyed/created anew and its local state is reset.
+- Passing into `Dynamic`/a portal: the signal must belong to a common owner
+  (hoist it up), otherwise after the owner is disposed a dangling handle
+  remains.
+
+Props table:
+
+| parameter type | read | write | reactivity |
+|---|---|---|---|
+| `T` | value | no | snapshot, only on recreation |
+| `Cell[T]`/`Signal[T]` | `.get()` | `.set/.update` | bindings on both sides |
+| `State[T]` (deep) | `.field`/`.get()` | `.field = v`/`.set` | per-field |
+| `Computed[T]` | `.get()` | no | computed |
+| `Resource[T]` | `case`/`.kind` | `.mutate/.refetch` | branches |
+| `List/Set/Table` | store API | structure/value | keyed |
+| `proc(...)` | call | — | event/callback |
+
+A write to a signal from an event is batched: several `open = ...` produce one
+flush. A write from an `effect` goes through `set/update`, with the usual
+restart rules.
+
+### 5.9 Ordinary Nim
+
+Inside the body `let/var`, `if/for/while`, `try`, `defer`, local
+procedures, generics are available. Restrictions:
+
+- `return` in a component/DSL closure body does not cross the component
+  boundary: do early exit via `if`/`Else`.
+- `break/continue` in a DSL `for` are forbidden (§5.3).
+- `var` changes of ordinary variables are not reactive; only
+  signals are reactive.
+
+### 5.10 Declarative dragging
+
+`drag.nim` implements the model-driven part of D2: the application enumerates
+the reachable model states and their positions, the controller picks the nearest
+target by pointer, and drop applies its state.
+
+```nim
+type
+  DragTarget*[S] = object
+    state*: S
+    pos*: Point
+
+  DragBehavior*[S] = object
+    targets*: seq[DragTarget[S]]
+    farTargets*: seq[DragTarget[S]]
+    farRadius*: float
+    floating*: bool
+
+  DragController*[S] = ref object
+    pointer*: State[Point]
+    active*: State[bool]
+    target*: State[int]
+    far*: State[bool]
+    targets*: seq[DragTarget[S]]
+```
+
+- `closest(targets).whenFar(fallback, radius).withFloating()` assembles the
+  behavior; `start(drag, behavior, p)`, `move(drag, p)`,
+  `finish(drag)`, `cancel(drag)`, `hasDrop(drag)`, `chosen(drag)`.
+- Target positions in the current slice come from the layout model/`rect()`;
+  speculative rendering of states and `lerpViews` are the next layer.
+- The `closest`/`between`/`whenFar`/`withFloating` operators are implemented as
+  `DragBehavior`; `between` currently picks the nearest target, visual
+  interpolation is the next layer. `vary`, `withSnapRadius`, `dropTarget`,
+  `switchToStateAndFollow` are not done yet.
+- Example `examples/ui/kanban.nim`: a card builds target states
+  "task inserted into each column/position", drop applies the chosen
+  state, ghost and `cls.drop(...)` give a preview; columns are
+  reordered via `between(...)`.
+- Example `examples/ui/rows.nim` repeats the rows/tiles from Dragology:
+  `closest(...).whenFar(stateWithout).withFloating()`.
+- Handlers in a loop must be moved into a per-element component
+  (`CardView`): Nimony captures the loop variable by reference (issue #2).
+
+### 5.11 Speculative rendering
+
+`spec.nim`:
+
+```nim
+SpecView[S] = object
+  state: S
+  root: Node
+  scope: Scope
+
+speculateOne(state, render) -> SpecView
+speculate(states, render) -> seq[SpecView]
+measure(view, selector, f) -> Point
+dispose(view)
+```
+
+- `render` runs in a separate detached root via `beginRoot`,
+  so the live UI/scope is not touched;
+- `find`/`measure` work over the rendered tree;
+- measurement is an external callback: in the browser `getBoundingClientRect`,
+  in tests coordinates from attributes or the model;
+- this replaces manual layout functions in drag targets; integration with
+  `buildDrag` is the next step.
+
+### 5.12 Motion core
+
+`motion.nim` is the basis of declarative animations:
+
+```nim
+bindMotion(e, motionValues(x, y, scale, opacity)) -> Motion
+m.animateTo(target, tween(0.25) | spring(100, 15))
+m.tick(dt) -> bool
+stagger(index, each) -> float
+```
+
+- tween and spring interpolation over four properties;
+- `Motion` writes style via `State[string]`, so the update goes through a
+  standard binding;
+- `easeLinear`/`easeOut`/`easeInOut`;
+- so far no variants/exit/AnimatePresence, shared layout (`layoutId`),
+  keyframes, and scroll hooks; these are layers on top of `spec`/`motion`.
+## 6. Asynchrony
+
+```nim
+effect:
+  let data = awaitJson(fetch("/api/todos"))
+  todos.replace(data.todos)
+  onCleanup:
+    cancelRequests()
+```
+
+- `effect` may call `.passive` procedures; when the runtime stops, it remembers the scope/computation and restores them on resume.
+- `.get()` after `await` subscribes the same effect.
+- If a signal changed while the effect was waiting, the effect restarts; the old coroutine is cancelled (its continuation is ignored).
+- `dispose`/cleanup remove the coroutine; a promise after dispose does nothing.
+- `delay()` inside library `await` helpers — as a separate statement (compiler limitation, see `docs/nimony-issues.md`).
+
+### 6.9 Plugin-native compilation (migration)
+
+The target layer is not `std/macros` but a Nimony plugin: a separate program transforms the NIF before sem.
+
+Verified on HEAD:
+
+- a template plugin with a `ui:` block receives the **untyped NIF** of the block before sem;
+- the plugin has access to `NifCursor`/`NifBuilder`, `asDot`, `firstChild`,
+  `collectChain`, `genSym`/`addIdent`, `ProcS`/`ParamsU`/`PragmasU`;
+- the plugin's output is ordinary runtime calls `ElE`/`attr`/`addClass`/`on`/
+  `finish`, so it works on both C and JS;
+- `tests/ui/js_uiblock.nim` builds with `nimony j` **without**
+  `std/macros` and renders `<div class="root">…`.
+
+`src/yith/uiblock_plugin.nim` — prototype: `c.Tag.class:`, attr/css/prop,
+`onClick`/`onCleanup`, nested elements, text.
+
+Exact `{.ui.}` works through Nimony's only pre-sem hook —
+`{.rewriteModule("path").}`:
+
+```nim
+{.rewriteModule("../../src/yith/uiblock_plugin").}
+proc View(count {.state.}: int): E {.ui.} = ...
+```
+
+The plugin receives the raw module, rewrites the body and the headers, removes
+`{.ui.}`, and turns `name {.state.}: T` into `State[T]` with get/set.
+Checks: `tests/ui/tuiphase*.nim` (C) and `tests/ui/js_uiphase.nim`
+(JS without std/macros).
+
+The block form `ui:` remains for the template-plugin path. The old
+`{.ui.}` macro still holds the unported parts (`slots`, `Resource`/`case`).
+
+## 7. Compile-time layer
+
+The layer is a **macro pragma `{.ui.}` on each `proc ...: E`**:
+
+```nim
+proc Component(): E {.ui.} =
+  c.Div.card:
+    Text("...")
+```
+
+The `ui` macro receives the procedure definition **before sem** (untyped), finds
+the body (child 8 of `nnkProcDef`), rewrites the UI calls and returns the
+modified definition. Then ordinary sem runs.
+
+Why a macro pragma:
+
+- named args (`class = "x"`) are not yet typed; the macro sees
+  `(call Div (vv class "x"))` and does not force sigmatch to look for a
+  `class` parameter.
+- `case user:`, `s = v`, `s += v`/methods, deep `signal` — the same
+  untyped AST, so they can be handled in the same pass. For
+  `s += v`/`s.foo()` the macro knows the signal name and inlines
+  `get → mutate → set`.
+- no compiler patch is needed: this is a standard Nimony macro pragma (verified).
+
+Nimony limitations that the macro works around:
+
+- the macro plugin host does not see module-level helper procedures → all
+  helper procedures (`transformTree`, `isUiCall`, …) are declared
+  **inside** the macro body;
+- the `for` variable is captured by reference (issue #2) → traversal of
+  `NimNode` children is done with a `while` loop, not a `for`;
+- the procedure definition arrives as `nnkStmtList` with a single `nnkProcDef`,
+  the body is child 8.
+
+The macro emits runtime calls (`elementE`, `setAttr`, `addClass`, `on`,
+…); sem after the macro chooses the overloads and types.
+
+The module-level `{.ui: "path".}` pre-sem plugin is a separate experiment
+(Nimony compatibility note `y21`) and is not part of the target design.
+
+The macro does only mechanical transformations:
+
+| source | lowering |
+|---|---|
+| body of `proc ...: E` | `fragment(proc (): E = body)` (build-once) |
+| `if` with a signal | `uiWhen(computed(cond), then, else)` |
+| `case` over a signal/Resource | `uiCase(computed(kind), branches)` |
+| `s = v` (`s: Signal`) | `s.set(v)` |
+| `s += v` / `s.foo()` (local signal) | `var yithV = s.get(); yithV op ...; s.set(yithV)` |
+| `signal(obj/seq)` | store + generated proxy types (`ObjState`/`SeqState`) |
+| `s.field` / `s[i].field` | `FieldRef.get/set` (proxy) |
+| `s.push/add/remove` (deep seq) | store operation |
+| `for x in list/seq` + `key` | `forEachList(xs, key, render)` |
+| `for x in set` / `for k, v in table` | `forEachSet` / `forEachTable` |
+| `Text(e)` | `textBind(computed(e))` |
+| `slot name:` / direct content | named argument / `children` |
+| `attr.*` / `css.*` / `prop.*` | `setAttr` / `addStyle` / `setProp` |
+| `c.Tag.class:` | `elementE` + `addClass`/`setAttr`/`on`/… |
+| bare text in a block | `textBind(...)` |
+| `slot name:` | named-argument closure |
+| direct block content | `children = proc (): E = ...` |
+| `page()` where `page: Signal[proc(): E]` | `Dynamic(page)` |
+
+Nimony HEAD `2c5b3dca` check (2026-11-09): the macro pragma `{.ui.}`
+works **without a compiler patch**. `c.Div.a:` and `c.Span.b:` in two
+`proc ...: E {.ui.}` produce `<div class="a">A</div>` and
+`<span class="b">B</span>`. Named args in `varargs[untyped]` are still
+not supported; the macro pragma works around them because it receives the
+untyped definition before sem.
+
+### 7.1 Implemented slice
+
+`src/yith/uipragma.nim` — macro `ui`; `tests/ui/tuipragma.nim`
+checks:
+
+- `c.Tag.class:` — arbitrary tags and classes (kebab-case); `cls(name)`
+  and `cls.active(cond)` for dynamic/conditional classes;
+- `attr.*`, `css.*`, `prop.*`, including chains
+  `attr.disabled(true).aria_label("Click")`,
+  `css.display("flex").gap("8px")`, `prop.value(name).checked(active)`;
+- `data_*`/`aria_*` and underscores → hyphens;
+- `css` converts camelCase/underscore to kebab-case, several
+  arguments are concatenated (`font_size(10, "px")` → `10px`);
+- a `bool` attribute value is presence semantics (`true` sets, `false`
+  removes), including `State[bool]`/`Computed[bool]`; no list of
+  boolean attribute names is needed — the `setAttr` overload chooses;
+- events `onClick(e):`/`onInput(e):`; `onMount(e: El)`/`onCreated`,
+  `onCleanup()` in the element scope; frameorc form `on.click(handler)`;
+- bare expression children are automatically wrapped in `Text(...)`
+  (strings, numbers, `State[string]`, `State[int]`, `a & b`, ...);
+- nested elements and `Text(State[string])`/`Text(State[int])`;
+- slots: `Card(): body` → `Card(children = uiChildren: body)`;
+  named: `slot title: body` → `title = uiChildren: body`; the component
+  accepts `children`/`title: proc () {.closure.}` and calls them inside
+  its layout;
+- auto-fragment: the body of `proc ...: E {.ui.}` is wrapped in `fragment`;
+  a multi-root component returns a fragment with all roots. The macro also
+  adds `discardable`, so a component call can be used
+  as a statement. The fragment is **build-once** (`Scope.buildOnce`): reads in the
+  body do not subscribe the component itself, subscriptions live in `computedExpr`/
+  `Text`/attr effects;
+- `if` in a UI context → `uiIf` (`uiWhen`): the branch is rebuilt when the
+  signals in the condition change;
+- `for` over a signal → `uiFor` (`uiLoop`) if the element type is unknown;
+  with `key expr` and a `State[seq[T]]` parameter the macro wires keyed
+  `forEachList(items, same, key, render)`: rows are reused by
+  key, ranges move, disappeared ones are removed, changed ones are
+  re-rendered. The key is a string (`$keyExpr`), `same` is generated as
+  `a == b`. For local `let items = state(@[...])` and
+  `let items: State[seq[T]] = ...` the element type is inferred, and the keyed
+  path is enabled too; if the type is unknown — `uiFor`. In event handlers
+  `if`/`for` remain ordinary (`uiCtx=false`);
+- event/`onCreated`/`onCleanup` lambdas automatically get
+  `{.closure.}`;
+- `Computed[T]`: `computed(proc (): T = ...)`, read via `.get()`;
+  `Text`/`attr`/`class`/`style`/`prop` accept `Computed`;
+- `s += v` / `-=` / `*=` / `/=` / `&=` and `s.foo(args)` for
+  local/parameter signals: if the call stands as a statement, the macro
+  lifts the mutation; if in a value position (`Text`, child, derived), any
+  method other than the signal API is rewritten to `s.get().foo(args)`. There is no list of
+  read-only names:
+  ```nim
+  block:
+    var yithV = s.get()
+    yithV += v        # or yithV.foo(args)
+    s.set(yithV)
+  ```
+  Therefore any `proc mut(x: var T)` functions work, not just
+  operators. Reading methods (`s.len`, `s.contains(x)`) in a
+  `Text`/child position the macro wraps in `computedExpr`: the expression is
+  rewritten to `s.get()`, the initial value is computed without a
+  subscription, and the effect owns the dependency. `computedExpr(expr)` handles
+  **the whole expression** — operators, function calls and `if` expressions:
+  `computedExpr(sqrt(x)/10 + y*2 + (if y < 0: 4 else: 8))`; the result is a
+  `State[T]`, `Text`/attr bind. In an arbitrary expression outside a binding —
+  `.get()` explicitly. Free functions `mut(s, v)` are not lifted. For
+  global signals the macro does not see the type:
+  `+=`/`-=` have concrete overloads on `State[int/float/string]` as a
+  fallback, arbitrary methods — explicit `.get`/`.set`/`.update`;
+- `s = v` — assignment cannot be overloaded, so the `{.ui.}` macro
+  collects local/parameter signals from `let s = state(...)`/
+  `signal(...)`/`cell(...)` and the parameter type and rewrites to `.set`.
+  Module-global signals are not visible to the macro — there `.set` is explicit;
+  `signal(v)` is an alias of `state(v)`;
+- local `let/var z = <expression with signals>` automatically
+  become `let z = computedExpr(<expression with .get()>)`; `z` is a `State[T]`
+  and participates in further reads and chains (`let z2 = z * 2` is wrapped
+  too). Not wrapped: `state`/`signal`/`cell`/`computed`/
+  `computedExpr`, UI calls and component calls; `let z = 42` remains a
+  value;
+- `Resource[T]`: synchronous `resource(proc (): T)` and passive
+  `resource(proc (): T {.passive.})`; `refetch`, `mutate`, `isLoading`,
+  `isError`. A passive resource lives in a single `effectPassive`: reads before
+  `await` subscribe it, a source change/`refetch` restarts the effect,
+  generation cuts off late responses. `case user:` → `uiCaseBlock` with an
+  if-chain over `kind`, `data`/`error` payloads — `State` on the handle.
+  The payloads are moved out of the `ResourceValue` variant because of a JS backend bug
+  (`docs/nimony-issues.md` #24); transitions and the API are unchanged by this.
+  `ArgResource[T, A]` + `resource(fetcher, arg)`/`refetch(r, arg)` —
+  synchronous and passive slices; the type name differs because of issue #26;
+- `key expr` in `for` for local `let items = state(@[...])` and
+  `let items: State[seq[T]] = ...` also wires keyed `forEachList`:
+  the element type is inferred from the literal/annotation, otherwise `uiFor` remains.
+
+Not yet: deep `signal` (`ObjState`/`SeqState`/`TRef` proxies),
+`List`/`Set`/`Table`, `Dynamic`, `Option` integration.
+The import for `{.ui.}` is separate: `import yith/uipragma`.
+
+Everything else is ordinary Nim and runtime primitives. If the macro is not attached,
+the body is wrapped in the runtime form `fragment(proc () = body)`, and
+`uiWhen`/`forEach`/`Dynamic`/`bindText` are called explicitly.
+
+Important: sugar for bare signals/`case` (`if open:`, `case user:`,
+`open = false`, `count += 1`) must be applied **before sem**. `let open` + `open = false` is a
+type/let error, and a type-plugin that runs after sem will not see it anymore.
+Therefore such sugar is done by a pre-sem macro/template plugin; a type-plugin on
+`E` only wraps bodies and rewrites `if`/`for` where the raw form
+is already type-safe. In portable code `.get()`/`.set()` are always valid.
+
+Compiler limitations that the layer must work around:
+
+- the `for` variable must not be captured by a closure → `ForEach` passes
+  the element as a parameter;
+- the type-plugin must not copy `for` verbatim → the loop is rebuilt with
+  fresh variables;
+- the component body must not restart on updates → the auto-wrapper
+  creates a build-once scope (`run = nil`, tracking off), not an effect;
+- deep `signal` for generic/imported/recursive types is not generated →
+  `cell`/explicit `Store`;
+- `defined(js)`/`nim_exit` and the rest — see `docs/nimony-issues.md`.
+
+## 8. Exact rules
+
+### 8.1 Dependencies
+
+- `.get()` adds an edge `computation → signal` if the computation
+  is running.
+- Before a computation restarts, all its old edges are removed; new ones
+  are collected anew.
+- Subscribe/unsubscribe is O(1); removing a scope does not scan signals.
+
+### 8.2 Notifications
+
+- `Signal.set`: compare (`eq`), on equality — exit; otherwise mark
+  subscribers.
+- `Computed`: recompute, compare; on equality do not wake downstream.
+- `Effect/Binding`: runs once per flush, even if several
+  dependencies changed.
+- `set` inside a flush adds work to the current pass; cycle protection —
+  a limit and a dev error.
+
+### 8.3 Scheduling
+
+- `set` from an event/imperative code → microtask flush.
+- `batch:` defers the flush until the end of the block; nested batches — one flush.
+- `flushSync()` — for tests and imperative code.
+- Order: computeds before the effects that depend on them; effects — by
+  scope depth (parent before child), so that a parent restart does not
+  leave work to the child.
+
+### 8.4 Ownership and dispose
+
+- A parent scope owns child scopes; structural replacement (branch, key,
+  `Dynamic`) removes children together with their state. The component body is
+  not restarted on updates, so its state is not lost.
+- Cleanup is LIFO, before DOM removal.
+- Keyed list: removing a key → dispose item-scope; moving —
+  the DOM range moves, the scope lives on.
+- `if` branch: condition change → dispose the old branch, build a new one.
+- Async: dispose cancels the coroutine; resuming into a dead scope
+  is ignored.
+
+### 8.5 Keyed diff
+
+1. Compute the keys of the new list; a duplicate — dev error.
+2. For existing keys: update the `index` signal, the `item` signal (if
+   `eq` is false), move the range.
+3. New keys: create item signals, a scope, call render, insert.
+4. Disappeared: dispose the scope, remove the range.
+5. If the keys did not change — not a single structural DOM change.
+6. `Set`/`Table` use the same diff by keys: the structure is the set of
+   keys (insertion order), the content is a per-key `Signal`. For `Table`
+   the table key is the identity, so `key` is not written in `for`.
+
+### 8.6 One signal — one target
+
+If different bindings read one `Signal`, all of them are recomputed on
+every change. For drag this means: the cursor position and `overIndex` must
+be different signals, otherwise every row recomputes `shift` on every
+pixel (string equality saves from a DOM write, but not from recomputation).
+
+## 9. Performance
+
+- One scope per component/branch/list item; subscriptions are an intrusive
+  list, O(1).
+- A binding changes one DOM node/attribute; no tree traversal.
+- Keyed collections: O(n) for a structural diff, O(1) for a content change
+  by key (hash lookup + per-key signal).
+- `Computed` with equality cuts off cascades.
+- `batch`/microtask/rAF: a series of `set` in pointermove gives one flush.
+- `Resource`: one passive effect per resource; generation cuts off late
+  responses; `mutate` does not make a request.
+- Memory: signals, bindings and scopes are freed on dispose; list key
+  tables — on removal.
+- Benchmark targets: 10k rows, single cell update < 1 ms, reorder of 10k
+  without recreating the DOM, ghost drag without re-rendering the list.
+
+## 10. Example: drag & drop with a ghost
+
+Dragging cards: the ghost follows the cursor, the other cards
+move apart, the list changes order only on drop.
+
+The example shows the **target** syntax: `List`, keyed `for`,
+attribute bindings and `Dynamic` are not implemented yet (see §11); the body of the example
+can be used as a checklist for the implementation.
+
+### 10.1 Data and drag state
+
+```nim
+type
+  Card = object
+    id: int
+    title: string
+    color: string
+
+  Drag = object
+    active: bool
+    id: int
+    fromIndex: int
+    overIndex: int
+    x, y: float
+    offsetX, offsetY: float
+    width, height: float
+
+const RowH = 72.0
+const RowPitch = 80.0
+
+let cards = list(@[
+  Card(id: 1, title: "Design", color: "#eef2ff"),
+  Card(id: 2, title: "Build",  color: "#ecfdf5"),
+  Card(id: 3, title: "Ship",   color: "#fef2f2"),
+], key = proc (c: Card): int = c.id)
+
+let drag = signal(Drag())
+var listTop = 0.0
+
+proc overIndexAt(y: float): int =
+  clamp(int((y - listTop + RowPitch / 2) / RowPitch), 0, cards.len.get() - 1)
+
+proc shift(index: Signal[int]; d: Drag): float =
+  if not d.active:
+    0.0
+  elif index.get() == d.fromIndex:
+    0.0
+  elif d.fromIndex < d.overIndex and index.get() > d.fromIndex and
+       index.get() <= d.overIndex:
+    -RowPitch
+  elif d.fromIndex > d.overIndex and index.get() >= d.overIndex and
+       index.get() < d.fromIndex:
+    RowPitch
+  else:
+    0.0
+```
+
+`shift` reads `index.get()`; when called from a style-binding this is a subscription to
+`index` and `drag`, not to the whole list.
+
+### 10.2 List row
+
+```nim
+proc CardRow(index: Signal[int]; card: Signal[Card];
+             drag: Signal[Drag]): E =
+  let dragging = computed(proc (): bool =
+    drag.get().id == card.get().id)
+  let transform = computed(proc (): string =
+    "translateY(" & $shift(index, drag.get()) & "px)")
+  c.Div.row:
+    cls.dragging(dragging)
+    css.transform(transform).transition("transform 120ms ease")
+    onPointerDown(e):
+      let r = e.currentTarget.rect()
+      drag.set(Drag(
+        active: true,
+        id: card.get().id,
+        fromIndex: index.get(),
+        overIndex: index.get(),
+        x: e.clientX, y: e.clientY,
+        offsetX: e.clientX - r.left,
+        offsetY: e.clientY - r.top,
+        width: r.width, height: r.height))
+      e.currentTarget.capture(e.pointerId)
+
+    onPointerMove(e):
+      if drag.get().active:
+        let oi = overIndexAt(e.clientY)
+        drag.update proc (v: var Drag) =
+          v.x = e.clientX
+          v.y = e.clientY
+          v.overIndex = oi
+
+    onPointerUp(e):
+      let d = drag.get()
+      if d.active:
+        batch:
+          if d.overIndex != d.fromIndex:
+            cards.move(d.fromIndex, d.overIndex)
+          drag.set(Drag())
+        e.currentTarget.release(e.pointerId)
+
+    onPointerCancel(e):
+      drag.set(Drag())
+      e.currentTarget.release(e.pointerId)
+
+    Text(card.get().title)
+```
+
+Why this is fine-grained:
+
+- `class`/`style` are separate bindings; pointermove changes only `drag`,
+  only those two attributes are recomputed. The row body is not executed.
+- `Text(card.get().title)` is a separate binding; updating the card does not
+  re-render the row.
+- `onPointerDown/Move/Up` are events, outside tracking; `.get()` in them subscribes
+  to nothing.
+- `capture(pointerId)` keeps move/up on the row even when the cursor is over
+  other elements.
+
+### 10.3 Ghost
+
+```nim
+proc Ghost(drag: Signal[Drag]; cards: List[Card]): E =
+  if drag.get().active:
+    # id/offset/size are stable for one drag; the position is read in a binding,
+    # otherwise it would freeze at the moment the branch was created.
+    let d = drag.get()
+    let card = cards.get(d.id)
+    let left = computed(proc (): string =
+      $(drag.get().x - d.offsetX) & "px")
+    let top = computed(proc (): string =
+      $(drag.get().y - d.offsetY) & "px")
+    c.Div.ghost:
+      css.position("fixed").left(left).top(top)
+      css.width($d.width & "px").height($d.height & "px")
+      css.pointer_events("none").z_index("50")
+      Text(card.get().title)
+```
+
+- `if drag.get().active` — `uiWhen`: until something is dragged, the ghost is not in the DOM at all.
+- The ghost is a separate component outside the list; `position: fixed` and
+  `pointer-events: none`, so it does not affect layout and does not intercept
+  events.
+- `card.get()` — item signal; if the card changes during a drag, the ghost
+  updates.
+
+### 10.4 Application
+
+```nim
+proc App(): E {.ui.} =
+  c.Div.board:
+    onMount(e):
+      listTop = e.rect().top
+    for i, card in cards:
+      key card.get().id
+      CardRow(i, card, drag)
+
+  Ghost(drag, cards)
+
+  onCleanup:
+    drag.set(Drag())
+```
+
+- `onCreated` remembers `listTop` for computing `overIndex`.
+- `for` is keyed; on `cards.move` the DOM range of the row moves, the scope and
+  handlers are preserved.
+- `onCleanup` resets drag if the application is unmounted.
+
+### 10.5 CSS
+
+```css
+.board { position: relative; width: 360px; }
+.row {
+  height: 72px;
+  margin: 4px 0;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+  touch-action: none;              /* pointermove instead of scrolling */
+  user-select: none;
+}
+.row.dragging { opacity: 0.25; }
+.ghost {
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.18);
+  transform: rotate(1deg);
+}
+```
+
+### 10.6 What happens step by step
+
+1. `pointerdown`: read the row rect, enable `drag`, capture the
+   pointer. A ghost appears (`uiWhen`), the row gets `dragging`.
+2. `pointermove`: `drag.update` changes `x/y/overIndex`. Only the ghost's
+   `style` and the rows' `style` are recomputed; `shift` moves the neighbors apart
+   via `translateY`. The list is not re-rendered.
+3. `pointerup`: in `batch` we do `cards.move(from, over)` and reset
+   `drag`. `ForEach` moves the row's DOM range; the ghost disappears,
+   the transformations are reset. One flush, no flicker.
+4. `pointercancel`/unmount: reset and `release`.
+
+## 11. Status and open questions
+
+**Implemented now:** `Signal`/`State`/`Scope`/`effect`/dispose,
+`Computed`, synchronous and passive `Resource[T]`/`ArgResource[T, A]` with
+generation and `case user:`, context, the async bridge
+(`effectPassive`/`awaitText`/JS fetch),
+the test DOM (`toHtml`/`fire`), the `{.ui.}` macro pragma: `c.Tag.class:`,
+attr/css/prop chains, `cls`, events, `onMount`/`onCleanup`, slots,
+auto-fragment, reactive `if`/`for`, keyed `forEachList` (including
+local `State[seq[T]]` with type inference), `s = v`, the `s += v` overloads,
+the JS backend (smoke/async/resource).
+
+**Target, not yet in code:** deep `signal` with generation of
+`ObjState`/`SeqState`/`TRef`/`FieldRef`, imperative
+`List`/`Set`/`Table`, `Dynamic`, `Option` integration,
+`if open:` sugar, an automatic type-plugin, JS tests of the `{.ui.}` DSL
+(currently the JS build cannot import `std/macros`, issue #25).
+
+**Open questions:**
+
+1. `onCreated(e).classes` with several root nodes of a component: apply
+   to the first element or to all? Decide before implementing `onCreated`.
+2. `case`/`while`: do a branch-swap like with `if`, or rebuild the block
+   (`uiBlock`)? By default — `uiBlock`, later `uiSwitch`.
+3. `List.items` on `updateAt`: update the snapshot without a structural
+   notification, or notify and rely on the keyed diff? The decision affects
+   O(n) when typing in a field.
+4. Slots and context: is a slot executed in the caller's context or in the
+   component's? In the design — in the context of the component's `provide`; confirm on
+   Chart/Plot.
+5. `for` over `Computed[seq[T]]` (filter): keys and stability; a test for
+   removing/restoring an element.
+6. Compiler dependencies: capture of the `for` variable (issue #2),
+   a verbatim copy of `for` in the type-plugin (#5), `defined(js)`/`nim_exit`.
+7. Nimony: the pre-sem module hook is reduced to a single annotation
+   `{.rewriteModule("path").}` (no phase selection and no type queries). Exact
+   `{.ui.}` and `c.Div.class:` work; the hook is ready for upstream. The fallback is the
+   template-plugin `ui:` + post-sem module plugin.
+8. `onCreated` or `onMount`: keep the current name or rename it according to
+   the semantics "after attaching to the document"?

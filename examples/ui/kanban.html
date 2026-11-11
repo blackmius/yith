@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>yith — declarative kanban</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; background: #fafafa; color: #222; }
+    .board { display: flex; gap: 16px; align-items: flex-start; padding: 24px; }
+    .col { width: 200px; min-height: 180px; background: #fff; border: 1px solid #d7d7d7;
+           border-radius: 8px; padding: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .col.drop { border-color: #2d7ff9; background: #eef5ff; }
+    .col-head { font-weight: 600; padding: 6px 6px 10px; cursor: grab; user-select: none; }
+    .col-title { display: block; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px;
+            margin: 6px; cursor: grab; user-select: none; }
+    .card:hover { border-color: #2d7ff9; }
+    .task-title { pointer-events: none; }
+    .ghost { opacity: .85; pointer-events: none; z-index: 100; transform: translate(-50%, -50%);
+             background: #fff; border: 1px solid #2d7ff9; border-radius: 6px;
+             padding: 10px; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module">
+    import './kanban.js';
+    NIF.start(NIF.__internExt(document.getElementById('app')));
+  </script>
+</body>
+</html>
